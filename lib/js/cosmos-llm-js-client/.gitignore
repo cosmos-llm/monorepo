@@ -1,0 +1,18 @@
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
+
+# Node.js
+node_modules/
+dist/
+.env
+.env.local
+*.log
+coverage/
+.DS_Store

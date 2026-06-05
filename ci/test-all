@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+PASS=()
+FAIL=()
+
+run_ruby_rake() {
+  local dir="$1"
+  local task="$2"
+  local name
+  name="$(basename "$dir")"
+
+  echo ""
+  echo "── $name ($task) ──────────────────────────────"
+  if [[ -f "$dir/devenv.nix" ]]; then
+    if (cd "$dir" && devenv shell -- bash -c "bundle install && bundle exec rake $task"); then
+      PASS+=("$name")
+    else
+      FAIL+=("$name")
+    fi
+  else
+    if (cd "$dir" && bundle install && bundle exec rake "$task"); then
+      PASS+=("$name")
+    else
+      FAIL+=("$name")
+    fi
+  fi
+}
+
+run_npm_test() {
+  local dir="$1"
+  local name
+  name="$(basename "$dir")"
+
+  echo ""
+  echo "── $name (npm test) ──────────────────────────────"
+  if (cd "$dir" && npm test); then
+    PASS+=("$name")
+  else
+    FAIL+=("$name")
+  fi
+}
+
+# Apps
+for dir in "$ROOT"/apps/*/; do
+  run_ruby_rake "$dir" test
+done
+
+# Ruby libs
+for dir in "$ROOT"/lib/ruby/*/; do
+  run_ruby_rake "$dir" test
+done
+
+# JS libs
+for dir in "$ROOT"/lib/js/*/; do
+  run_npm_test "$dir"
+done
+
+# Summary
+echo ""
+echo "════════════════════════════════════════"
+echo "Results: ${#PASS[@]} passed, ${#FAIL[@]} failed"
+
+if [[ ${#PASS[@]} -gt 0 ]]; then
+  echo ""
+  echo "Passed:"
+  for name in "${PASS[@]}"; do
+    echo "  ✓ $name"
+  done
+fi
+
+if [[ ${#FAIL[@]} -gt 0 ]]; then
+  echo ""
+  echo "Failed:"
+  for name in "${FAIL[@]}"; do
+    echo "  ✗ $name"
+  done
+  exit 1
+fi

@@ -1,0 +1,315 @@
+
+── cosmos-llm-ruby-demo-hello (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 116ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (5.25ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (7.12ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Bundle complete! 7 Gemfile dependencies, 37 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+Run options: --seed 55142
+
+# Running:
+
+...........
+
+Finished in 0.003278s, 3355.6115 runs/s, 6406.1675 assertions/s.
+
+11 runs, 21 assertions, 0 failures, 0 errors, 0 skips
+Coverage report generated for Minitest to /mnt/storage/projects/organizations/cosmos-llm/apps/cosmos-llm-ruby-demo-hello/coverage.
+Line Coverage: 70.24% (59 / 84)
+
+── cosmos-llm-ruby-demo-markdowner (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 11.1s
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (2.58ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (5.17ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Fetching gem metadata from https://rubygems.org/.........
+Resolving dependencies...
+Fetching rake 13.4.2
+Installing rake 13.4.2
+Fetching ast 2.4.3
+Fetching event_stream_parser 1.0.0
+Fetching uri 1.1.1
+Fetching json 2.19.5
+Fetching logger 1.7.0
+Fetching io-console 0.8.2
+Fetching ostruct 0.6.3
+Fetching thor 1.5.0
+Fetching zeitwerk 2.8.2
+Fetching docile 1.4.1
+Fetching language_server-protocol 3.17.0.5
+Fetching lint_roller 1.1.0
+Fetching minitest 5.27.0
+Fetching parallel 2.1.0
+Fetching racc 1.8.1
+Fetching prism 1.9.0
+Installing ast 2.4.3
+Fetching rainbow 3.1.1
+Installing event_stream_parser 1.0.0
+Fetching regexp_parser 2.12.0
+Installing uri 1.1.1
+Fetching ruby-progressbar 1.13.0
+Installing json 2.19.5 with native extensions
+Installing logger 1.7.0
+Fetching unicode-emoji 4.2.0
+Installing io-console 0.8.2 with native extensions
+Installing ostruct 0.6.3
+Fetching simplecov-html 0.13.2
+Installing thor 1.5.0
+Fetching simplecov_json_formatter 0.1.4
+Installing zeitwerk 2.8.2
+Installing docile 1.4.1
+Fetching yard 0.9.43
+Fetching net-http 0.9.1
+Installing language_server-protocol 3.17.0.5
+Installing lint_roller 1.1.0
+Installing minitest 5.27.0
+Installing parallel 2.1.0
+Installing racc 1.8.1 with native extensions
+Installing rainbow 3.1.1
+Installing prism 1.9.0 with native extensions
+Installing regexp_parser 2.12.0
+Installing ruby-progressbar 1.13.0
+Installing unicode-emoji 4.2.0
+Installing simplecov_json_formatter 0.1.4
+Installing simplecov-html 0.13.2
+Installing net-http 0.9.1
+Fetching unicode-display_width 3.2.0
+Fetching simplecov 0.22.0
+Fetching faraday-net_http 3.4.3
+Installing yard 0.9.43
+Installing unicode-display_width 3.2.0
+Installing simplecov 0.22.0
+Installing faraday-net_http 3.4.3
+Fetching parser 3.3.11.1
+Installing parser 3.3.11.1
+Fetching reline 0.6.3
+Installing reline 0.6.3
+Fetching highline 3.1.2
+Installing highline 3.1.2
+Fetching faraday 2.14.2
+Installing faraday 2.14.2
+Using cosmos-llm 0.1.6 (was 0.1.4) from source at `../../lib/ruby/cosmos-llm-ruby-client`
+Fetching rubocop-ast 1.49.1
+Installing rubocop-ast 1.49.1
+Fetching rubocop 1.86.2
+Installing rubocop 1.86.2
+Bundle complete! 8 Gemfile dependencies, 38 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+Post-install message from minitest:
+NOTE: minitest 5 will be the last in the minitest family to support
+      ruby 1.8 to 2.7. If you need to keep using these versions,
+      you need to pin your dependency to minitest with something
+      like "~> 5.0". See History.rdoc to locate compatible
+      versions.
+
+      Further, minitest 6 will be dropping the following:
+
+      + MiniTest (it's been Minitest for >10 years)
+      + MiniTest::Unit
+      + MiniTest::Unit::TestCase
+      + assert_send (unless you argue for it well)
+      + assert_equal nil, obj
+      + mocks and stubs: moving minitest/mock.rb to its own gem
+/mnt/storage/projects/organizations/cosmos-llm/lib/ruby/cosmos-llm-ruby-tool/lib/cosmos/llm/tool/definition.rb:55: warning: method redefined; discarding old description
+Run options: --seed 26070
+
+# Running:
+
+....................
+
+Finished in 0.005761s, 3471.4894 runs/s, 6769.4042 assertions/s.
+
+20 runs, 39 assertions, 0 failures, 0 errors, 0 skips
+Coverage report generated for Minitest to /mnt/storage/projects/organizations/cosmos-llm/apps/cosmos-llm-ruby-demo-markdowner/coverage.
+Line Coverage: 73.58% (142 / 193)
+
+── cosmos-llm-ruby-client (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 6.12s
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (5.29ms)
+1 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 1.10: https://devenv.sh/getting-started/#installation
+Bundle complete! 11 Gemfile dependencies, 47 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+2 installed gems you directly depend on are looking for funding.
+  Run `bundle fund` for details
+Run options: --seed 41820
+
+# Running:
+
+..............................................................................................................................................................................................................................................................................................................................
+
+Finished in 1.479436s, 214.9467 runs/s, 523.8482 assertions/s.
+
+318 runs, 775 assertions, 0 failures, 0 errors, 0 skips
+
+── cosmos-llm-ruby-context (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 62.6ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (6.56ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (6.88ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Bundle complete! 8 Gemfile dependencies, 25 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+1 installed gem you directly depend on is looking for funding.
+  Run `bundle fund` for details
+Run options: --seed 36256
+
+# Running:
+
+...................................................................................................................................................................................................................................................................
+
+Finished in 0.007953s, 32566.8677 runs/s, 96820.4176 assertions/s.
+
+259 runs, 770 assertions, 0 failures, 0 errors, 0 skips
+
+── cosmos-llm-ruby-tool (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 63.3ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (7.94ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (8.30ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Bundle complete! 8 Gemfile dependencies, 36 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+1 installed gem you directly depend on is looking for funding.
+  Run `bundle fund` for details
+/mnt/storage/projects/organizations/cosmos-llm/lib/ruby/cosmos-llm-ruby-tool/lib/cosmos/llm/tool/definition.rb:55: warning: method redefined; discarding old description
+Run options: --seed 3697
+
+# Running:
+
+...................................................................................................................................................................................................................................................................................
+
+Finished in 0.008929s, 30797.5662 runs/s, 75706.0173 assertions/s.
+
+275 runs, 676 assertions, 0 failures, 0 errors, 0 skips
+
+── cosmos-llm-ruby-tool-preset (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 67.8ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (4.78ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (6.46ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Fetching gem metadata from https://rubygems.org/.........
+Resolving dependencies...
+Could not find compatible versions
+
+Because every version of cosmos-llm-tool depends on cosmos-llm ~> 0.1
+  and cosmos-llm ~> 0.1 could not be found in rubygems repository https://rubygems.org/ or installed locally,
+  cosmos-llm-tool cannot be used.
+So, because Gemfile depends on cosmos-llm-tool >= 0,
+  version solving has failed.
+
+── cosmos-llm-ruby-virtual-filesystem (test) ──────────────────────────────
+Using Cachix caches: devenv
+Building shell in 64.3ms
+Entering shell
+Running tasks     devenv:enterShell
+
+Running           devenv:files:cleanup
+Succeeded         devenv:files:cleanup (8.96ms)
+Running           devenv:enterShell
+Succeeded         devenv:enterShell (13.05ms)
+Running           devenv:enterTest
+No command        devenv:enterTest
+1 Skipped, 2 Succeeded
+✨ devenv 1.9.1 is out of date. Please update to 2.1.2: https://devenv.sh/getting-started/#installation
+Bundle complete! 7 Gemfile dependencies, 24 gems now installed.
+Bundled gems are installed into `./.devenv/state/.bundle`
+1 installed gem you directly depend on is looking for funding.
+  Run `bundle fund` for details
+Run options: --seed 11142
+
+# Running:
+
+...................................................................................................................
+
+Finished in 0.008850s, 12994.1844 runs/s, 50055.8581 assertions/s.
+
+115 runs, 443 assertions, 0 failures, 0 errors, 0 skips
+
+── cosmos-llm-js-client (npm test) ──────────────────────────────
+
+> cosmos-llm@0.1.0 test
+> vitest run
+
+
+[1m[46m RUN [49m[22m [36mv4.0.18 [39m[90m/mnt/storage/projects/organizations/cosmos-llm/lib/js/cosmos-llm-js-client[39m
+
+ [32m✓[39m src/http-client.test.ts [2m([22m[2m17 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+ [32m✓[39m src/configuration.test.ts [2m([22m[2m32 tests[22m[2m)[22m[32m 24[2mms[22m[39m
+ [32m✓[39m src/errors.test.ts [2m([22m[2m32 tests[22m[2m)[22m[32m 17[2mms[22m[39m
+ [32m✓[39m src/providers/base.test.ts [2m([22m[2m30 tests[22m[2m)[22m[32m 19[2mms[22m[39m
+ [32m✓[39m src/providers/openai.test.ts [2m([22m[2m29 tests[22m[2m)[22m[32m 26[2mms[22m[39m
+ [32m✓[39m src/client.test.ts [2m([22m[2m43 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+ [32m✓[39m src/providers/anthropic.test.ts [2m([22m[2m27 tests[22m[2m)[22m[32m 32[2mms[22m[39m
+ [32m✓[39m src/providers/index.test.ts [2m([22m[2m20 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m src/index.test.ts [2m([22m[2m34 tests[22m[2m)[22m[33m 466[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m9 passed[39m[22m[90m (9)[39m
+[2m      Tests [22m [1m[32m264 passed[39m[22m[90m (264)[39m
+[2m   Start at [22m 11:07:46
+[2m   Duration [22m 818ms[2m (transform 964ms, setup 344ms, import 1.08s, tests 629ms, environment 2ms)[22m
+
+
+════════════════════════════════════════
+Results: 7 passed, 1 failed
+
+Passed:
+  ✓ cosmos-llm-ruby-demo-hello
+  ✓ cosmos-llm-ruby-demo-markdowner
+  ✓ cosmos-llm-ruby-client
+  ✓ cosmos-llm-ruby-context
+  ✓ cosmos-llm-ruby-tool
+  ✓ cosmos-llm-ruby-virtual-filesystem
+  ✓ cosmos-llm-js-client
+
+Failed:
+  ✗ cosmos-llm-ruby-tool-preset

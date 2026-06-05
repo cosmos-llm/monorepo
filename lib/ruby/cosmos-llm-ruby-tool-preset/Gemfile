@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec
+
+gem 'cosmos-llm-tool', path: '../cosmos-llm-ruby-tool'
+gem 'cosmos-llm-virtual-filesystem', path: '../cosmos-llm-ruby-virtual-filesystem'

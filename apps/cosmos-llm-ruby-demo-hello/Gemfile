@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec
+
+# Use the local cosmos-llm during development
+gem "cosmos-llm", path: "../../lib/ruby/cosmos-llm-ruby-client"

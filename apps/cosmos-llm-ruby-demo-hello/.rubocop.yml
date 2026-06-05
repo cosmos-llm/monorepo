@@ -1,0 +1,26 @@
+AllCops:
+  NewCops: enable
+  TargetRubyVersion: 3.0
+  Exclude:
+    - "vendor/**/*"
+
+Style/StringLiterals:
+  EnforcedStyle: double_quotes
+
+Style/StringLiteralsInInterpolation:
+  EnforcedStyle: double_quotes
+
+# This is an app gem — dev deps live in the gemspec by convention here.
+Gemspec/DevelopmentDependencies:
+  Enabled: false
+
+# Top-level module is the app namespace; a doc comment adds no value.
+Style/Documentation:
+  Enabled: false
+
+# The REPL loop and option parser are inherently long; splitting them hurts readability.
+Metrics/MethodLength:
+  Max: 35
+
+Metrics/AbcSize:
+  Max: 30

@@ -1,0 +1,19 @@
+[package]
+name = "cosmos-llm-virtual-filesystem"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Minimal in-memory virtual filesystem for LLM contexts"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-virtual-filesystem"
+readme = "README.md"
+keywords = ["llm", "ai", "filesystem", "context"]
+categories = ["data-structures"]
+
+[dependencies]
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]

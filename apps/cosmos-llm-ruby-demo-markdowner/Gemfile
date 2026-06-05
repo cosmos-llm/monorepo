@@ -1,0 +1,8 @@
+# frozen_string_literal: true
+
+source "https://rubygems.org"
+
+gemspec
+
+gem "cosmos-llm",      path: "../../lib/ruby/cosmos-llm-ruby-client"
+gem "cosmos-llm-tool", path: "../../lib/ruby/cosmos-llm-ruby-tool"
