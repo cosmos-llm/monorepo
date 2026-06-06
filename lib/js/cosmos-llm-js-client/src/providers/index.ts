@@ -26,7 +26,7 @@ export type ProviderConstructor = new (options?: ProviderOptions) => BaseProvide
 /**
  * Registry of available providers.
  */
-const PROVIDER_REGISTRY: Map<string, ProviderConstructor> = new Map([
+const PROVIDER_REGISTRY: Map<string, ProviderConstructor> = new Map<string, ProviderConstructor>([
   ['openai', OpenAIProvider],
   ['anthropic', AnthropicProvider],
 ]);

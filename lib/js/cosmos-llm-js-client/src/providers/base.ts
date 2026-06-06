@@ -80,7 +80,7 @@ export abstract class BaseProvider {
    *
    * @param options - The streaming options
    */
-  async stream(options: StreamOptions): Promise<void> {
+  async stream(_options: StreamOptions): Promise<void> {
     throw new Error(
       `${this.constructor.name} does not support streaming. ` +
         'Use the non-streaming methods instead: completion()'
@@ -94,7 +94,7 @@ export abstract class BaseProvider {
    * @param options - The embedding options
    * @returns The embedding response
    */
-  async embedding(options: EmbeddingOptions): Promise<any> {
+  async embedding(_options: EmbeddingOptions): Promise<any> {
     throw new Error(
       `${this.constructor.name} does not support embeddings. ` +
         'Try using a provider that supports embeddings like OpenAI or Cohere.'

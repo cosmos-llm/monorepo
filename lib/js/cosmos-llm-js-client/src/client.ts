@@ -65,7 +65,7 @@ export class Client {
    * @param opts - Additional options (reserved for future use)
    * @returns The generated completion text
    */
-  async complete(text: string, opts: SimpleCompletionOptions = {}): Promise<string> {
+  async complete(text: string, _opts: SimpleCompletionOptions = {}): Promise<string> {
     if (!text || text.trim() === '') {
       throw new Error(
         'Please provide text to complete.\n' +
