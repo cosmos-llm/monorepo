@@ -252,6 +252,10 @@ module Cosmos
             @stop_reason = response['stop_reason']
           end
 
+          def tool_use?
+            @stop_reason == 'tool_use'
+          end
+
           def to_s
             @message.to_s
           end

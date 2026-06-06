@@ -191,6 +191,10 @@ module Cosmos
             [GoogleChoice.new(@raw_response['candidates']&.first)]
           end
 
+          def tool_use?
+            @raw_response.dig('candidates', 0, 'content', 'parts', 0, 'functionCall') != nil
+          end
+
           def to_s
             choices.map(&:to_s).join(' ')
           end

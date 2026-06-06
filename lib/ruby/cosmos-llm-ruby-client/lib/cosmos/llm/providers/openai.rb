@@ -228,6 +228,10 @@ module Cosmos
             @raw_response['embedding']
           end
 
+          def tool_use?
+            @raw_response.dig('choices', 0, 'finish_reason') == 'tool_calls'
+          end
+
           def to_s
             choices.map(&:to_s).join(' ')
           end
