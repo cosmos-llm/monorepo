@@ -232,6 +232,26 @@ module Cosmos
             @raw_response.dig('choices', 0, 'finish_reason') == 'tool_calls'
           end
 
+          # Provider-neutral assistant text.
+          def text
+            @raw_response.dig('choices', 0, 'message', 'content') || ''
+          end
+
+          # Provider-neutral tool calls: array of { 'id', 'name', 'input' } with
+          # input PARSED from OpenAI's JSON-string arguments.
+          def tool_calls
+            (@raw_response.dig('choices', 0, 'message', 'tool_calls') || []).map do |tc|
+              fn = tc['function'] || {}
+              args = fn['arguments']
+              parsed = args.is_a?(String) ? (JSON.parse(args) rescue {}) : (args || {})
+              {
+                'id'    => tc['id'],
+                'name'  => fn['name'],
+                'input' => parsed
+              }
+            end
+          end
+
           def to_s
             choices.map(&:to_s).join(' ')
           end

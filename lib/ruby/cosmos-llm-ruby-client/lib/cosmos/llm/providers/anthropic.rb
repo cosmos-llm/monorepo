@@ -236,6 +236,29 @@ module Cosmos
             @raw_response['usage']
           end
 
+          def tool_use?
+            choices.first.tool_use?
+          end
+
+          # Provider-neutral assistant text.
+          def text
+            choices.first.message.content
+          end
+
+          # Provider-neutral tool calls: array of { 'id', 'name', 'input' } with
+          # input as a PARSED hash (matches Google/OpenAI neutral shape).
+          def tool_calls
+            (@raw_response['content'] || [])
+              .select { |block| block['type'] == 'tool_use' }
+              .map do |block|
+                {
+                  'id'    => block['id'],
+                  'name'  => block['name'],
+                  'input' => block['input'] || {}
+                }
+              end
+          end
+
           def to_s
             choices.map(&:to_s).join(' ')
           end

@@ -120,23 +120,26 @@ module Cosmos
 
         def transform_options(options)
           messages = options[:messages] || []
-          system_messages = messages.select { |m| m[:role] == 'system' }
-          conversation_messages = messages.reject { |m| m[:role] == 'system' }
+          system_messages = messages.select { |m| symbolic(m, :role) == 'system' }
+          conversation_messages = messages.reject { |m| symbolic(m, :role) == 'system' }
 
           body = {
             contents: conversation_messages.map do |msg|
               {
-                role: msg[:role] == 'assistant' ? 'model' : 'user',
-                parts: [{ text: msg[:content] }]
+                role: symbolic(msg, :role) == 'assistant' ? 'model' : 'user',
+                parts: content_to_parts(symbolic(msg, :content))
               }
             end
           }
 
           if system_messages.any?
             body[:systemInstruction] = {
-              parts: [{ text: system_messages.map { |m| m[:content] }.join("\n") }]
+              parts: [{ text: system_messages.map { |m| text_of(symbolic(m, :content)) }.join("\n") }]
             }
           end
+
+          tools = transform_tools(options[:tools])
+          body[:tools] = tools if tools
 
           generation_config = {}
           generation_config[:temperature] = options[:temperature] if options[:temperature]
@@ -147,6 +150,104 @@ module Cosmos
           body[:generationConfig] = generation_config unless generation_config.empty?
 
           body
+        end
+
+        # Fetch a key from a message hash regardless of symbol/string keys.
+        def symbolic(hash, key)
+          return nil unless hash.is_a?(Hash)
+
+          hash[key] || hash[key.to_s]
+        end
+
+        # Convert message content into Gemini `parts`. Content may be a plain
+        # string, or an array of normalized blocks (text / tool_use / tool_result)
+        # in the shape an agent loop accumulates across turns.
+        def content_to_parts(content)
+          return [{ text: content.to_s }] unless content.is_a?(Array)
+
+          parts = content.map { |block| block_to_part(block) }.compact
+          parts.empty? ? [{ text: '' }] : parts
+        end
+
+        def block_to_part(block)
+          return { text: block.to_s } unless block.is_a?(Hash)
+
+          type = block['type'] || block[:type]
+          case type
+          when 'tool_use'
+            {
+              functionCall: {
+                name: block['name'] || block[:name],
+                args: block['input'] || block[:input] || {}
+              }
+            }
+          when 'tool_result'
+            {
+              functionResponse: {
+                name: block['name'] || block[:name] || block['tool_use_id'] || block[:tool_use_id],
+                response: { result: stringify(block['content'] || block[:content]) }
+              }
+            }
+          else
+            { text: block['text'] || block[:text] || '' }
+          end
+        end
+
+        def text_of(content)
+          return content.to_s unless content.is_a?(Array)
+
+          content.map { |b| b.is_a?(Hash) ? (b['text'] || b[:text]) : b }.compact.join("\n")
+        end
+
+        def stringify(value)
+          value.is_a?(String) ? value : JSON.generate(value)
+        end
+
+        # Translate provider-neutral tool schemas (Anthropic-style: name,
+        # description, input_schema) into Gemini functionDeclarations.
+        def transform_tools(tools)
+          return nil if tools.nil? || tools.empty?
+
+          declarations = tools.map do |tool|
+            name        = tool[:name] || tool['name']
+            description = tool[:description] || tool['description']
+            schema      = tool[:input_schema] || tool['input_schema'] ||
+                          tool[:parameters] || tool['parameters']
+            decl = { name: name }
+            decl[:description] = description if description
+            decl[:parameters] = sanitize_schema(schema) if schema && !schema_empty?(schema)
+            decl
+          end
+
+          [{ functionDeclarations: declarations }]
+        end
+
+        # Gemini rejects empty object schemas; drop parameters with no properties.
+        def schema_empty?(schema)
+          props = schema[:properties] || schema['properties']
+          props.nil? || props.empty?
+        end
+
+        # Gemini's schema dialect is a strict subset of JSON Schema; strip keys it
+        # does not accept so a tool definition written for Anthropic still loads.
+        def sanitize_schema(schema)
+          return schema unless schema.is_a?(Hash)
+
+          allowed = %w[type description properties required items enum format nullable]
+          schema.each_with_object({}) do |(k, v), out|
+            key = k.to_s
+            next unless allowed.include?(key)
+
+            out[key] =
+              case key
+              when 'properties'
+                (v || {}).transform_values { |sub| sanitize_schema(sub) }
+              when 'items'
+                sanitize_schema(v)
+              else
+                v
+              end
+          end
         end
 
         def handle_response(response, response_class = GoogleResponse)
@@ -191,8 +292,33 @@ module Cosmos
             [GoogleChoice.new(@raw_response['candidates']&.first)]
           end
 
+          def parts
+            @raw_response.dig('candidates', 0, 'content', 'parts') || []
+          end
+
           def tool_use?
-            @raw_response.dig('candidates', 0, 'content', 'parts', 0, 'functionCall') != nil
+            parts.any? { |p| p.is_a?(Hash) && p['functionCall'] }
+          end
+
+          # Provider-neutral assistant text: concatenation of all text parts.
+          def text
+            parts.filter_map { |p| p['text'] if p.is_a?(Hash) }.join
+          end
+
+          # Provider-neutral tool calls: array of { 'id', 'name', 'input' } where
+          # input is a PARSED hash. Gemini gives no call id, so synthesize a stable
+          # one from position + name so tool_result correlation still works.
+          def tool_calls
+            parts.each_with_index.filter_map do |p, i|
+              next unless p.is_a?(Hash) && (fc = p['functionCall'])
+
+              name = fc['name']
+              {
+                'id'    => "call_#{i}_#{name}",
+                'name'  => name,
+                'input' => fc['args'] || {}
+              }
+            end
           end
 
           def to_s
@@ -207,7 +333,7 @@ module Cosmos
           attr_reader :message
 
           def initialize(candidate)
-            @message = GoogleMessage.new(candidate&.dig('content', 'parts')&.first)
+            @message = GoogleMessage.new(candidate&.dig('content', 'parts') || [])
           end
 
           def to_s
@@ -217,12 +343,13 @@ module Cosmos
 
         # Represents a message in a Google conversation.
         #
-        # Messages contain text content extracted from parts.
+        # Messages contain text content concatenated from all text parts.
         class GoogleMessage
           attr_reader :content
 
-          def initialize(part)
-            @content = part&.dig('text') || ''
+          def initialize(parts)
+            parts = [parts] unless parts.is_a?(Array)
+            @content = parts.filter_map { |p| p.is_a?(Hash) ? p['text'] : nil }.join
           end
 
           def to_s
