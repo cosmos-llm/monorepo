@@ -68,24 +68,7 @@ module Cosmos
                 # Validate format
                 raise ArgumentError, "Unsupported format: #{format}" unless %w[html text markdown].include?(format)
 
-                content, = fetch_with_redirects(uri, timeout)
-
-                raise StandardError, 'Failed to fetch content' unless content
-
-                # Convert content based on format
-                case format
-                when 'html'
-                  content
-                when 'text'
-                  html_to_text(content)
-                when 'markdown'
-                  html_to_markdown(content)
-                end
-
-                # Validate format
-                raise ArgumentError, "Unsupported format: #{format}" unless %w[html text markdown].include?(format)
-
-                content, final_uri, content_type = fetch_with_redirects(uri, timeout)
+                content, final_uri, content_type = Cosmos::Llm::Tool::Preset.fetch_with_redirects(uri, timeout)
 
                 raise StandardError, 'Failed to fetch content' unless content
 
@@ -94,9 +77,9 @@ module Cosmos
                                     when 'html'
                                       content
                                     when 'text'
-                                      html_to_text(content)
+                                      Cosmos::Llm::Tool::Preset.html_to_text(content)
                                     when 'markdown'
-                                      html_to_markdown(content)
+                                      Cosmos::Llm::Tool::Preset.html_to_markdown(content)
                                     end
 
                 {
@@ -150,7 +133,9 @@ module Cosmos
             http.read_timeout = timeout
 
             request = Net::HTTP::Get.new(current_uri.request_uri)
-            request['User-Agent'] = 'Durable-LLM-Tool-Preset/1.0'
+            request['User-Agent'] = 'Mozilla/5.0 (compatible; cosmos-llm-researcher/1.0)'
+            request['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+            request['Accept-Language'] = 'en-US,en;q=0.5'
             response = http.request(request)
 
             if response.is_a?(Net::HTTPSuccess)
