@@ -20,11 +20,20 @@ module Cosmos
         # Provides functionality to fetch content from URLs with support for
         # HTML to markdown conversion and timeout handling.
         #
+        # NOTE: this tool's declared name is +:webfetch+ (one word, no
+        # underscore) — not +:web_fetch+. If you dispatch tool calls by
+        # looking up a caller-built hash keyed on your own naming (e.g.
+        # +{web_fetch: Preset.webfetch}+), the key won't match the name the
+        # model is told to call, and dispatch will silently miss every call
+        # to this tool. Prefer building the dispatch table from
+        # +tool.name => tool+ (or use a Registry, which already keys by
+        # +tool.name+) rather than a hand-picked hash key.
+        #
         # @example Using the webfetch tool
         #   tool = Cosmos::Llm::Tool::Preset.webfetch
         #   result = tool.call(url: 'https://example.com', format: 'markdown')
         #
-        # @return [Cosmos::Llm::Tool::Definition] A webfetch tool
+        # @return [Cosmos::Llm::Tool::Definition] A webfetch tool, named :webfetch
         def self.webfetch
           Cosmos::Llm::Tool.define(:webfetch, register: false) do
             description 'Fetch content from URLs with format conversion support (text, markdown, html)'

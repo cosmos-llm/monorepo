@@ -61,6 +61,12 @@ module Cosmos
 
       # Extracts token usage information from a response
       #
+      # Handles both OpenAI-shaped usage objects (responding to
+      # +#prompt_tokens+/+#completion_tokens+/+#total_tokens+) and Anthropic's
+      # raw usage hash (+{"input_tokens" => ..., "output_tokens" => ...}+,
+      # returned as-is by +AnthropicResponse#usage+, with no +total_tokens+
+      # key), so this works across providers without raising.
+      #
       # @param response [Object] The API response object
       # @return [Hash, nil] Hash with :prompt_tokens, :completion_tokens, :total_tokens
       # @example Get token usage
@@ -73,11 +79,23 @@ module Cosmos
         usage = response.usage
         return nil unless usage
 
-        {
-          prompt_tokens: usage.prompt_tokens,
-          completion_tokens: usage.completion_tokens,
-          total_tokens: usage.total_tokens
-        }
+        if usage.is_a?(Hash)
+          prompt_tokens = usage['prompt_tokens'] || usage[:prompt_tokens] || usage['input_tokens'] || usage[:input_tokens]
+          completion_tokens = usage['completion_tokens'] || usage[:completion_tokens] || usage['output_tokens'] || usage[:output_tokens]
+          total_tokens = usage['total_tokens'] || usage[:total_tokens] || (prompt_tokens.to_i + completion_tokens.to_i)
+
+          {
+            prompt_tokens: prompt_tokens,
+            completion_tokens: completion_tokens,
+            total_tokens: total_tokens
+          }
+        else
+          {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens: usage.total_tokens
+          }
+        end
       end
 
       # Extracts the finish reason from a response

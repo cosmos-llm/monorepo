@@ -121,6 +121,12 @@ module Cosmos
       # @option params [Array<Hash>] :messages The conversation messages
       # @option params [Float] :temperature Sampling temperature (0.0-2.0)
       # @option params [Integer] :max_tokens Maximum tokens to generate
+      # @option params [Array<Hash>] :tools Tool schemas to offer the model (e.g.
+      #   from Cosmos::Llm::Tool::Definition#to_anthropic_schema or #to_openai_schema).
+      #   Forwarded to the provider as-is, with no validation or transformation.
+      # @option params [String, Hash] :tool_choice Provider-specific tool choice
+      #   setting (e.g. 'auto', 'none', or a specific tool selector). Forwarded
+      #   to the provider as-is.
       # @return [Object] The completion response object
       # @raise [ArgumentError] If params is not a Hash
       # @raise [Cosmos::Llm::APIError] If the API request fails
@@ -132,6 +138,13 @@ module Cosmos
       #       { role: 'user', content: 'Hello!' }
       #     ],
       #     temperature: 0.7
+      #   )
+      # @example Perform a completion with tools
+      #   tool = Cosmos::Llm::Tool::Preset.webfetch
+      #   response = client.completion(
+      #     messages: [{ role: 'user', content: 'Fetch https://example.com' }],
+      #     tools: [tool.to_anthropic_schema],
+      #     tool_choice: 'auto'
       #   )
       def completion(params = {})
         ensure_provider!

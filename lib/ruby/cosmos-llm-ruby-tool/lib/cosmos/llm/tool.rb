@@ -140,5 +140,6 @@ require 'cosmos/llm/tool/registry'
 require 'cosmos/llm/tool/schemas'
 require 'cosmos/llm/tool/executor'
 require 'cosmos/llm/tool/errors'
+require 'cosmos/llm/tool/loop'
 
 # Copyright (c) 2025 Durable Programming, LLC. All rights reserved.

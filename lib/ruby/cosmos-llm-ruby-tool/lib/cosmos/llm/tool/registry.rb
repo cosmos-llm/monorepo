@@ -8,6 +8,14 @@ module Cosmos
       # This class provides a centralized registry for storing and retrieving
       # tool definitions, enabling tool discovery and management.
       #
+      # Tools are always stored under +tool.name+ (see #register) — never
+      # under a caller-supplied hash key. Build tool dispatch tables from a
+      # Registry, or from +tool.name => tool+ pairs, rather than a hand-built
+      # hash whose keys you choose yourself; a mismatched key (e.g. storing
+      # Cosmos::Llm::Tool::Preset.webfetch, whose declared name is
+      # +:webfetch+, under a +:web_fetch+ key) makes dispatch silently miss
+      # every call to that tool instead of raising.
+      #
       # @example Using the registry
       #   registry = Registry.new
       #   registry.register(my_tool)

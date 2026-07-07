@@ -56,19 +56,34 @@ module Cosmos
           Cosmos::Llm.configuration.anthropic&.api_key || ENV['ANTHROPIC_API_KEY']
         end
 
+        # @return [String] The default base URL for Anthropic's API, or the
+        #   value of ENV['ANTHROPIC_BASE_URL'] if set. Lets consumers point
+        #   the provider at a proxy, regional gateway, or test double without
+        #   touching the BASE_URL constant.
+        def default_base_url
+          ENV['ANTHROPIC_BASE_URL'] || BASE_URL
+        end
+
         # @!attribute [rw] api_key
         #   @return [String, nil] The API key used for authentication with Anthropic
         attr_accessor :api_key
 
+        # @!attribute [r] base_url
+        #   @return [String] The base URL requests are sent to
+        attr_reader :base_url
+
         # Initializes a new Anthropic provider instance.
         #
         # @param api_key [String, nil] The Anthropic API key. If nil, uses default_api_key
+        # @param base_url [String, nil] The API base URL. If nil, uses default_base_url
+        #   (ENV['ANTHROPIC_BASE_URL'] or BASE_URL)
         # @return [Anthropic] A new Anthropic provider instance
-        def initialize(api_key: nil)
+        def initialize(api_key: nil, base_url: nil)
           super()
           @api_key = api_key || default_api_key
+          @base_url = base_url || default_base_url
 
-          @conn = Cosmos::Llm::HttpClient.new(url: BASE_URL)
+          @conn = Cosmos::Llm::HttpClient.new(url: @base_url)
         end
 
         # Performs a completion request to Anthropic's messages API.
@@ -245,8 +260,18 @@ module Cosmos
             choices.first.message.content
           end
 
-          # Provider-neutral tool calls: array of { 'id', 'name', 'input' } with
-          # input as a PARSED hash (matches Google/OpenAI neutral shape).
+          # Top-level, provider-neutral tool calls: array of flat
+          # { 'id', 'name', 'input' } hashes with 'input' already PARSED into
+          # a Hash. This is the one most callers want, and matches the
+          # Google/OpenAI neutral shape.
+          #
+          # NOTE: this is a *different* shape from
+          # AnthropicMessage#tool_calls (i.e. response.choices.first.message.tool_calls),
+          # which returns OpenAI-function-call-shaped hashes
+          # ({ 'id', 'type', 'function' => { 'name', 'arguments' } }) with
+          # 'arguments' as a JSON-encoded STRING, not a parsed Hash. Same
+          # method name, different contract — prefer this top-level method
+          # unless you specifically need the OpenAI-function-call shape.
           def tool_calls
             (@raw_response['content'] || [])
               .select { |block| block['type'] == 'tool_use' }
@@ -289,6 +314,18 @@ module Cosmos
         # Messages have a role (user, assistant) and content composed of text blocks
         # and potentially tool use blocks.
         class AnthropicMessage
+          # @!attribute [r] tool_calls
+          #   OpenAI-function-call-shaped tool calls: array of
+          #   { 'id', 'type' => 'function', 'function' => { 'name', 'arguments' } }
+          #   hashes, with 'arguments' JSON-STRING-encoded (not parsed).
+          #
+          #   NOTE: this is a *different* shape from the top-level
+          #   AnthropicResponse#tool_calls (i.e. response.tool_calls), which
+          #   returns flat { 'id', 'name', 'input' } hashes with 'input'
+          #   already parsed into a Hash. Same method name, different
+          #   contract — most callers want AnthropicResponse#tool_calls
+          #   instead of this one.
+          #   @return [Array<Hash>]
           attr_reader :role, :content, :tool_calls, :raw_content
 
           def initialize(response)
