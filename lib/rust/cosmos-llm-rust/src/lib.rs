@@ -44,4 +44,6 @@ pub mod types;
 pub use client::Client;
 pub use config::Config;
 pub use error::CosmosError;
-pub use types::{Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, Usage};
+pub use types::{
+    Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, ToolCall, Usage,
+};

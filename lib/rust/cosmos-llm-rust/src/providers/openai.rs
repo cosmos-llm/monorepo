@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::error::CosmosError;
 use crate::providers::Provider;
-use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, Usage};
+use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
 const BASE_URL: &str = "https://api.openai.com/v1";
 
@@ -81,10 +81,30 @@ impl OpenAiProvider {
                 let content = c["message"]["content"].as_str().unwrap_or("").to_owned();
                 let finish_reason = c["finish_reason"].as_str().map(str::to_owned);
                 let index = c["index"].as_u64().unwrap_or(0) as u32;
+                let tool_calls = c["message"]["tool_calls"]
+                    .as_array()
+                    .map(|calls| {
+                        calls
+                            .iter()
+                            .map(|tc| {
+                                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+                                ToolCall {
+                                    id: tc["id"].as_str().unwrap_or_default().to_owned(),
+                                    name: tc["function"]["name"]
+                                        .as_str()
+                                        .unwrap_or_default()
+                                        .to_owned(),
+                                    input: serde_json::from_str(args_str).unwrap_or(Value::Null),
+                                }
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 Choice {
                     index,
                     message: Message { role, content },
                     finish_reason,
+                    tool_calls,
                 }
             })
             .collect();
@@ -146,6 +166,12 @@ impl Provider for OpenAiProvider {
             }
             if let Some(ref stop) = req.stop {
                 body["stop"] = json!(stop);
+            }
+            if let Some(ref tools) = req.tools {
+                body["tools"] = json!(tools);
+            }
+            if let Some(ref choice) = req.tool_choice {
+                body["tool_choice"] = json!(choice);
             }
 
             let resp = self
@@ -240,6 +266,39 @@ mod tests {
         });
         let resp = OpenAiProvider::map_response(body).unwrap();
         assert_eq!(resp.content(), Some("Hello!"));
+        assert!(!resp.tool_use());
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
+    }
+
+    #[test]
+    fn map_response_parses_tool_calls() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-2",
+            "model": "gpt-4o",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"Boston\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": { "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20 }
+        });
+        let resp = OpenAiProvider::map_response(body).unwrap();
+        assert!(resp.tool_use());
+        let calls = resp.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].input, serde_json::json!({"city": "Boston"}));
     }
 }

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// A single message in a conversation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -100,6 +101,15 @@ pub struct CompletionRequest {
     /// Sequences at which the model will stop generating further tokens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
+    /// Tool schemas the model may call, in provider-specific format (e.g. as
+    /// produced by `ToolDefinition::to_openai_schema`/`to_anthropic_schema`
+    /// in the `cosmos-llm-tool` crate).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<Value>>,
+    /// Provider-specific tool choice directive (e.g. `"auto"`, `"none"`, or a
+    /// forced-tool object).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_choice: Option<Value>,
 }
 
 impl CompletionRequest {
@@ -125,6 +135,8 @@ impl CompletionRequest {
             max_tokens: None,
             top_p: None,
             stop: None,
+            tools: None,
+            tool_choice: None,
         }
     }
 
@@ -187,6 +199,44 @@ impl CompletionRequest {
         self.stop = Some(stop);
         self
     }
+
+    /// Sets the tool schemas the model may call.
+    ///
+    /// Each entry is a provider-specific schema `Value`, e.g. as produced by
+    /// `ToolDefinition::to_openai_schema`/`to_anthropic_schema` in the
+    /// `cosmos-llm-tool` crate.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message};
+    /// use serde_json::json;
+    ///
+    /// let req = CompletionRequest::new("gpt-4o", vec![Message::user("hi")])
+    ///     .with_tools(vec![json!({"type": "function", "function": {"name": "echo"}})]);
+    /// assert_eq!(req.tools.unwrap().len(), 1);
+    /// ```
+    pub fn with_tools(mut self, tools: Vec<Value>) -> Self {
+        self.tools = Some(tools);
+        self
+    }
+
+    /// Sets the provider-specific tool choice directive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message};
+    /// use serde_json::json;
+    ///
+    /// let req = CompletionRequest::new("gpt-4o", vec![Message::user("hi")])
+    ///     .with_tool_choice(json!("auto"));
+    /// assert_eq!(req.tool_choice, Some(json!("auto")));
+    /// ```
+    pub fn with_tool_choice(mut self, choice: Value) -> Self {
+        self.tool_choice = Some(choice);
+        self
+    }
 }
 
 /// Token usage reported by the provider.
@@ -200,6 +250,22 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+/// A single tool call requested by the model, normalized across providers.
+///
+/// `input` is always a parsed JSON value regardless of whether the source
+/// provider encoded arguments as a JSON string (OpenAI) or a native object
+/// (Anthropic).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned identifier for this call, used to correlate a
+    /// tool result back to the request.
+    pub id: String,
+    /// Name of the tool being called.
+    pub name: String,
+    /// Parsed arguments to pass to the tool.
+    pub input: Value,
+}
+
 /// A single choice returned by the provider.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Choice {
@@ -209,6 +275,9 @@ pub struct Choice {
     pub message: Message,
     /// Reason the generation stopped (e.g. `"stop"`, `"length"`).
     pub finish_reason: Option<String>,
+    /// Tool calls requested by the model, if any.
+    #[serde(default)]
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// The response from a completion request.
@@ -242,6 +311,7 @@ impl CompletionResponse {
     ///         index: 0,
     ///         message: Message::assistant("Hello!"),
     ///         finish_reason: Some("stop".into()),
+    ///         tool_calls: vec![],
     ///     }],
     ///     usage: None,
     /// };
@@ -249,6 +319,78 @@ impl CompletionResponse {
     /// ```
     pub fn content(&self) -> Option<&str> {
         self.choices.first().map(|c| c.message.content.as_str())
+    }
+
+    /// Returns the assistant text of the first choice, or an empty string if
+    /// there are no choices or no text content.
+    ///
+    /// Unlike [`CompletionResponse::content`], this never returns `None` —
+    /// it mirrors the Ruby client's provider-neutral `text` accessor, which
+    /// callers can use unconditionally in a tool-calling loop.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::CompletionResponse;
+    ///
+    /// let resp = CompletionResponse {
+    ///     id: None,
+    ///     model: None,
+    ///     choices: vec![],
+    ///     usage: None,
+    /// };
+    /// assert_eq!(resp.text(), "");
+    /// ```
+    pub fn text(&self) -> &str {
+        self.content().unwrap_or("")
+    }
+
+    /// Returns `true` if the first choice requested any tool calls.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionResponse, Choice, Message, ToolCall};
+    /// use serde_json::json;
+    ///
+    /// let resp = CompletionResponse {
+    ///     id: None,
+    ///     model: None,
+    ///     choices: vec![Choice {
+    ///         index: 0,
+    ///         message: Message::assistant(""),
+    ///         finish_reason: Some("tool_calls".into()),
+    ///         tool_calls: vec![ToolCall { id: "1".into(), name: "echo".into(), input: json!({}) }],
+    ///     }],
+    ///     usage: None,
+    /// };
+    /// assert!(resp.tool_use());
+    /// ```
+    pub fn tool_use(&self) -> bool {
+        !self.tool_calls().is_empty()
+    }
+
+    /// Returns the tool calls requested by the first choice, or an empty
+    /// slice if there are no choices or no tool calls.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::CompletionResponse;
+    ///
+    /// let resp = CompletionResponse {
+    ///     id: None,
+    ///     model: None,
+    ///     choices: vec![],
+    ///     usage: None,
+    /// };
+    /// assert!(resp.tool_calls().is_empty());
+    /// ```
+    pub fn tool_calls(&self) -> &[ToolCall] {
+        self.choices
+            .first()
+            .map(|c| c.tool_calls.as_slice())
+            .unwrap_or(&[])
     }
 }
 
@@ -281,11 +423,15 @@ mod tests {
             .with_temperature(0.5)
             .with_max_tokens(100)
             .with_top_p(0.9)
-            .with_stop(vec!["END".into()]);
+            .with_stop(vec!["END".into()])
+            .with_tools(vec![serde_json::json!({"name": "echo"})])
+            .with_tool_choice(serde_json::json!("auto"));
         assert_eq!(req.temperature, Some(0.5));
         assert_eq!(req.max_tokens, Some(100));
         assert_eq!(req.top_p, Some(0.9));
         assert!(req.stop.is_some());
+        assert_eq!(req.tools.as_ref().unwrap().len(), 1);
+        assert_eq!(req.tool_choice, Some(serde_json::json!("auto")));
     }
 
     #[test]
@@ -297,10 +443,36 @@ mod tests {
                 index: 0,
                 message: Message::assistant("hello"),
                 finish_reason: None,
+                tool_calls: vec![],
             }],
             usage: None,
         };
         assert_eq!(resp.content(), Some("hello"));
+        assert_eq!(resp.text(), "hello");
+        assert!(!resp.tool_use());
+        assert!(resp.tool_calls().is_empty());
+    }
+
+    #[test]
+    fn completion_response_tool_calls() {
+        let resp = CompletionResponse {
+            id: None,
+            model: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant(""),
+                finish_reason: Some("tool_calls".into()),
+                tool_calls: vec![ToolCall {
+                    id: "1".into(),
+                    name: "echo".into(),
+                    input: serde_json::json!({"msg": "hi"}),
+                }],
+            }],
+            usage: None,
+        };
+        assert!(resp.tool_use());
+        assert_eq!(resp.tool_calls().len(), 1);
+        assert_eq!(resp.tool_calls()[0].name, "echo");
     }
 
     #[test]

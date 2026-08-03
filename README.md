@@ -4,6 +4,8 @@ A monorepo of libraries for integrating Large Language Models across Ruby, Rust,
 
 Each language has a parallel set of libraries that share a common architecture: a unified client, a context DSL, a tool/function-calling layer, and a virtual filesystem abstraction.
 
+The Ruby set is the most developed, followed by the Rust crate, and then the JS crate.
+
 ## Libraries
 
 ### Ruby (`lib/ruby/`)

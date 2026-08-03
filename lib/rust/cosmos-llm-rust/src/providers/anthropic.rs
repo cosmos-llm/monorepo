@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 
 use crate::error::CosmosError;
 use crate::providers::Provider;
-use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, Usage};
+use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
 const BASE_URL: &str = "https://api.anthropic.com/v1";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -118,6 +118,21 @@ impl AnthropicProvider {
 
         let finish_reason = body["stop_reason"].as_str().map(str::to_owned);
 
+        let tool_calls = body["content"]
+            .as_array()
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|b| b["type"] == "tool_use")
+                    .map(|b| ToolCall {
+                        id: b["id"].as_str().unwrap_or_default().to_owned(),
+                        name: b["name"].as_str().unwrap_or_default().to_owned(),
+                        input: b["input"].clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let usage = if body["usage"].is_object() {
             Some(Usage {
                 prompt_tokens: body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
@@ -137,6 +152,7 @@ impl AnthropicProvider {
                 index: 0,
                 message: Message::assistant(text),
                 finish_reason,
+                tool_calls,
             }],
             usage,
         })
@@ -188,6 +204,12 @@ impl Provider for AnthropicProvider {
             }
             if let Some(ref stop) = req.stop {
                 body["stop_sequences"] = json!(stop);
+            }
+            if let Some(ref tools) = req.tools {
+                body["tools"] = json!(tools);
+            }
+            if let Some(ref choice) = req.tool_choice {
+                body["tool_choice"] = json!(choice);
             }
 
             let resp = self
@@ -263,7 +285,30 @@ mod tests {
         });
         let resp = AnthropicProvider::map_response(body).unwrap();
         assert_eq!(resp.content(), Some("Hi there!"));
+        assert!(!resp.tool_use());
         assert_eq!(resp.usage.unwrap().total_tokens, 12);
+    }
+
+    #[test]
+    fn map_response_parses_tool_use_blocks() {
+        let body = serde_json::json!({
+            "id": "msg_2",
+            "model": "claude-3-5-sonnet-20241022",
+            "content": [
+                { "type": "text", "text": "Let me check that." },
+                { "type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": { "city": "Boston" } }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 6 }
+        });
+        let resp = AnthropicProvider::map_response(body).unwrap();
+        assert!(resp.tool_use());
+        assert_eq!(resp.text(), "Let me check that.");
+        let calls = resp.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "toolu_1");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].input, serde_json::json!({"city": "Boston"}));
     }
 
     #[tokio::test]
