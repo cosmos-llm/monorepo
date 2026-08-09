@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::error::CosmosError;
-use crate::providers::{resolve, Provider};
-use crate::types::{CompletionRequest, CompletionResponse, Message};
+use crate::providers::{resolve, resolve_with_base_url, CompletionStream, Provider};
+use crate::types::{CompletionRequest, CompletionResponse, Message, StreamAccumulator};
 
 /// High-level client for interacting with LLM providers.
 ///
@@ -92,6 +92,50 @@ impl Client {
         })
     }
 
+    /// Creates a [`Client`] pointed at a non-default API root.
+    ///
+    /// Use this to talk to an OpenAI-compatible server (Azure OpenAI, a local
+    /// llama.cpp or vLLM instance), route through a proxy, or point tests at a
+    /// mock server.
+    ///
+    /// # Arguments
+    ///
+    /// * `provider_name` — lowercase provider name; selects the wire format.
+    /// * `api_key` — API key string.
+    /// * `base_url` — API root, replacing the provider's default.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::UnsupportedProvider`] when the name is not
+    /// recognised.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    ///
+    /// // A local vLLM server speaking the OpenAI protocol.
+    /// let client = Client::new_with_base_url(
+    ///     "openai",
+    ///     "not-checked-locally",
+    ///     "http://localhost:8000/v1",
+    /// )
+    /// .unwrap()
+    /// .with_model("meta-llama/Llama-3-8b");
+    /// ```
+    pub fn new_with_base_url(
+        provider_name: &str,
+        api_key: impl Into<String>,
+        base_url: impl AsRef<str>,
+    ) -> Result<Self, CosmosError> {
+        let key = api_key.into();
+        let provider = resolve_with_base_url(provider_name, Some(&key), Some(base_url.as_ref()))?;
+        Ok(Self {
+            provider,
+            default_model: None,
+        })
+    }
+
     /// Sets the default model for all subsequent requests (builder pattern).
     ///
     /// # Examples
@@ -126,17 +170,44 @@ impl Client {
         Ok(self)
     }
 
+    /// Switches to a different provider at a non-default API root, preserving
+    /// the default model.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::UnsupportedProvider`] when the name is not
+    /// recognised.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    ///
+    /// let client = Client::new("openai", "sk-test").unwrap();
+    /// let client = client
+    ///     .with_provider_at("openai", Some("local"), "http://localhost:8000/v1")
+    ///     .unwrap();
+    /// ```
+    pub fn with_provider_at(
+        mut self,
+        name: &str,
+        api_key: Option<&str>,
+        base_url: impl AsRef<str>,
+    ) -> Result<Self, CosmosError> {
+        self.provider = resolve_with_base_url(name, api_key, Some(base_url.as_ref()))?;
+        Ok(self)
+    }
+
     /// Returns `true` if the current provider implements streaming.
     ///
-    /// No provider implements streaming yet, so this is currently always
-    /// `false`. See [`Provider::supports_streaming`].
+    /// See [`Provider::supports_streaming`].
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use cosmos_llm::Client;
     /// let client = Client::new("openai", "sk-test").unwrap();
-    /// assert!(!client.can_stream());
+    /// assert!(client.can_stream());
     /// ```
     pub fn can_stream(&self) -> bool {
         self.provider.supports_streaming()
@@ -245,6 +316,138 @@ impl Client {
         self.completion(req).await
     }
 
+    /// Sends a full [`CompletionRequest`] and returns a stream of chunks.
+    ///
+    /// As with [`Client::completion`], an empty `model` is filled in from the
+    /// configured default. The returned stream is `'static` and `Send`, so it
+    /// can be moved into a spawned task.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::Configuration`] when no model is available, or
+    /// [`CosmosError::Streaming`] when the provider does not support
+    /// streaming. Errors that occur once the stream is open are yielded as
+    /// stream items rather than returned here.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::{Client, CompletionRequest, Message};
+    /// use futures_util::StreamExt;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = Client::new("openai", "sk-test").unwrap();
+    /// let req = CompletionRequest::new("gpt-4o", vec![Message::user("Tell me a story")]);
+    ///
+    /// let mut stream = client.stream_completion(req).await.unwrap();
+    /// while let Some(chunk) = stream.next().await {
+    ///     print!("{}", chunk.unwrap().delta);
+    /// }
+    /// # })
+    /// ```
+    pub async fn stream_completion(
+        &self,
+        mut req: CompletionRequest,
+    ) -> Result<CompletionStream, CosmosError> {
+        if req.model.is_empty() {
+            req.model = self
+                .default_model
+                .clone()
+                .ok_or_else(|| CosmosError::Configuration("no model specified".into()))?;
+        }
+        self.provider.stream_completion(&req).await
+    }
+
+    /// Sends a plain text prompt and returns a stream of chunks.
+    ///
+    /// The streaming counterpart of [`Client::complete`]: the prompt is sent
+    /// as a single `user` message, and the default model must be set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::Configuration`] when no default model is set,
+    /// or any error from [`Client::stream_completion`].
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    /// use futures_util::StreamExt;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = Client::new("openai", "sk-test").unwrap().with_model("gpt-4o");
+    ///
+    /// let mut stream = client.stream("Count to ten").await.unwrap();
+    /// while let Some(chunk) = stream.next().await {
+    ///     print!("{}", chunk.unwrap().delta);
+    /// }
+    /// # })
+    /// ```
+    pub async fn stream(&self, prompt: impl Into<String>) -> Result<CompletionStream, CosmosError> {
+        let model = self.default_model.as_deref().ok_or_else(|| {
+            CosmosError::Configuration(
+                "no default model set; call .with_model() or set it in Config".to_owned(),
+            )
+        })?;
+
+        self.stream_completion(CompletionRequest::new(model, vec![Message::user(prompt)]))
+            .await
+    }
+
+    /// Streams a completion, invoking `on_chunk` per chunk, and returns the
+    /// assembled response.
+    ///
+    /// Useful when the caller wants live output *and* the final response —
+    /// printing tokens as they arrive while still getting tool calls and usage
+    /// at the end. The response is built by a
+    /// [`StreamAccumulator`], so it has the same shape a non-streaming call
+    /// would have returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns any error from [`Client::stream_completion`], or the first
+    /// error yielded mid-stream. Text received before an error is discarded.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::{Client, CompletionRequest, Message};
+    /// use std::io::Write;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = Client::new("openai", "sk-test").unwrap();
+    /// let req = CompletionRequest::new("gpt-4o", vec![Message::user("Hi")]);
+    ///
+    /// let resp = client.stream_to_completion(req, |chunk| {
+    ///     print!("{}", chunk.delta);
+    ///     let _ = std::io::stdout().flush();
+    /// }).await.unwrap();
+    ///
+    /// println!("\nfinished: {:?}", resp.choices[0].finish_reason);
+    /// # })
+    /// ```
+    pub async fn stream_to_completion<F>(
+        &self,
+        req: CompletionRequest,
+        mut on_chunk: F,
+    ) -> Result<CompletionResponse, CosmosError>
+    where
+        F: FnMut(&crate::types::StreamChunk),
+    {
+        use futures_util::StreamExt;
+
+        let mut stream = self.stream_completion(req).await?;
+        let mut acc = StreamAccumulator::new();
+
+        while let Some(item) = stream.next().await {
+            let chunk = item?;
+            on_chunk(&chunk);
+            acc.push(&chunk);
+        }
+
+        Ok(acc.into_response())
+    }
+
     /// Returns the list of models available from the current provider.
     ///
     /// # Errors
@@ -284,9 +487,10 @@ mod tests {
     }
 
     #[test]
-    fn can_stream_openai() {
-        let client = Client::new("openai", "key").unwrap();
-        assert!(!client.can_stream());
+    fn can_stream_reports_provider_support() {
+        for name in ["openai", "anthropic", "openrouter"] {
+            assert!(Client::new(name, "key").unwrap().can_stream(), "{name}");
+        }
     }
 
     #[tokio::test]
@@ -294,5 +498,27 @@ mod tests {
         let client = Client::new("openai", "key").unwrap();
         let err = client.complete("hello").await.unwrap_err();
         assert!(matches!(err, CosmosError::Configuration(_)));
+    }
+
+    // A `CompletionStream` is not `Debug`, so these assert on the error arm
+    // directly rather than via `unwrap_err`.
+
+    #[tokio::test]
+    async fn stream_without_model_returns_config_error() {
+        let client = Client::new("openai", "key").unwrap();
+        assert!(matches!(
+            client.stream("hello").await,
+            Err(CosmosError::Configuration(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stream_completion_without_model_returns_config_error() {
+        let client = Client::new("openai", "key").unwrap();
+        let req = CompletionRequest::new("", vec![Message::user("hi")]);
+        assert!(matches!(
+            client.stream_completion(req).await,
+            Err(CosmosError::Configuration(_))
+        ));
     }
 }

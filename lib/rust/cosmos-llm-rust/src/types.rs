@@ -394,13 +394,297 @@ impl CompletionResponse {
     }
 }
 
+/// A partial tool call delivered during a streaming response.
+///
+/// Providers stream tool arguments as JSON text fragments, so `arguments` here
+/// is an unparsed partial string rather than a [`Value`]. Fragments belonging
+/// to the same call share an `index`; feed them to a
+/// [`StreamAccumulator`] to reassemble complete [`ToolCall`]s.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ToolCallDelta {
+    /// Position of this tool call within the message, used to correlate
+    /// fragments across chunks.
+    pub index: u32,
+    /// Provider-assigned call identifier. Sent once, on the first fragment.
+    pub id: Option<String>,
+    /// Tool name. Sent once, on the first fragment.
+    pub name: Option<String>,
+    /// Partial JSON text to append to this call's arguments.
+    pub arguments: Option<String>,
+}
+
 /// A delta chunk delivered during a streaming response.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Most chunks carry only a text `delta`. The final chunk of a stream carries
+/// a `finish_reason`, and — when the provider reports it — `usage`.
+///
+/// # Examples
+///
+/// ```
+/// use cosmos_llm::StreamChunk;
+///
+/// let chunk = StreamChunk::text("Hello");
+/// assert_eq!(chunk.delta, "Hello");
+/// assert!(chunk.finish_reason.is_none());
+/// ```
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct StreamChunk {
-    /// Incremental text fragment for this chunk.
+    /// Incremental text fragment for this chunk. Empty for chunks that carry
+    /// only tool-call or metadata updates.
     pub delta: String,
     /// Set when the stream is complete.
     pub finish_reason: Option<String>,
+    /// Partial tool calls advanced by this chunk.
+    pub tool_calls: Vec<ToolCallDelta>,
+    /// Token usage, when the provider reports it. Typically present only on
+    /// the final chunk.
+    pub usage: Option<Usage>,
+}
+
+impl StreamChunk {
+    /// Creates a chunk carrying only a text fragment.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::StreamChunk;
+    /// assert_eq!(StreamChunk::text("hi").delta, "hi");
+    /// ```
+    pub fn text(delta: impl Into<String>) -> Self {
+        Self {
+            delta: delta.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Returns `true` if this chunk carries no content of any kind.
+    ///
+    /// Providers emit bookkeeping events (Anthropic's `ping`, OpenAI's role
+    /// preamble) that map to empty chunks. Callers rendering output can skip
+    /// these; the accumulator ignores them either way.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::StreamChunk;
+    ///
+    /// assert!(StreamChunk::default().is_empty());
+    /// assert!(!StreamChunk::text("x").is_empty());
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.delta.is_empty()
+            && self.finish_reason.is_none()
+            && self.tool_calls.is_empty()
+            && self.usage.is_none()
+    }
+}
+
+/// Reassembles streamed [`StreamChunk`]s into a [`CompletionResponse`].
+///
+/// Streaming hands back text a fragment at a time and tool arguments as
+/// partial JSON. Feeding every chunk to an accumulator yields the same
+/// response shape a non-streaming call would have produced, so a tool-calling
+/// loop can be written once and used with either.
+///
+/// # Examples
+///
+/// ```
+/// use cosmos_llm::{StreamAccumulator, StreamChunk};
+///
+/// let mut acc = StreamAccumulator::new();
+/// acc.push(&StreamChunk::text("Hello, "));
+/// acc.push(&StreamChunk::text("world!"));
+///
+/// assert_eq!(acc.text(), "Hello, world!");
+/// assert_eq!(acc.into_response().text(), "Hello, world!");
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct StreamAccumulator {
+    text: String,
+    finish_reason: Option<String>,
+    usage: Option<Usage>,
+    /// Partial tool calls keyed by stream index, in first-seen order.
+    tool_calls: Vec<(u32, PartialToolCall)>,
+}
+
+/// A tool call being assembled from streamed fragments.
+#[derive(Debug, Clone, Default)]
+struct PartialToolCall {
+    id: String,
+    name: String,
+    arguments: String,
+}
+
+impl StreamAccumulator {
+    /// Creates an empty accumulator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::StreamAccumulator;
+    /// assert_eq!(StreamAccumulator::new().text(), "");
+    /// ```
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Folds one chunk into the accumulated state.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{StreamAccumulator, StreamChunk};
+    ///
+    /// let mut acc = StreamAccumulator::new();
+    /// acc.push(&StreamChunk::text("partial"));
+    /// assert_eq!(acc.text(), "partial");
+    /// ```
+    pub fn push(&mut self, chunk: &StreamChunk) {
+        self.text.push_str(&chunk.delta);
+
+        if chunk.finish_reason.is_some() {
+            self.finish_reason = chunk.finish_reason.clone();
+        }
+        if chunk.usage.is_some() {
+            self.usage = chunk.usage.clone();
+        }
+
+        for delta in &chunk.tool_calls {
+            let entry = match self.tool_calls.iter_mut().find(|(i, _)| *i == delta.index) {
+                Some((_, call)) => call,
+                None => {
+                    self.tool_calls
+                        .push((delta.index, PartialToolCall::default()));
+                    &mut self.tool_calls.last_mut().expect("just pushed").1
+                }
+            };
+            if let Some(ref id) = delta.id {
+                entry.id = id.clone();
+            }
+            if let Some(ref name) = delta.name {
+                entry.name = name.clone();
+            }
+            if let Some(ref args) = delta.arguments {
+                entry.arguments.push_str(args);
+            }
+        }
+    }
+
+    /// Returns the text accumulated so far.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{StreamAccumulator, StreamChunk};
+    ///
+    /// let mut acc = StreamAccumulator::new();
+    /// acc.push(&StreamChunk::text("so far"));
+    /// assert_eq!(acc.text(), "so far");
+    /// ```
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Returns the finish reason, once the stream has reported one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::StreamAccumulator;
+    /// assert_eq!(StreamAccumulator::new().finish_reason(), None);
+    /// ```
+    pub fn finish_reason(&self) -> Option<&str> {
+        self.finish_reason.as_deref()
+    }
+
+    /// Returns the tool calls assembled so far.
+    ///
+    /// Arguments that are not yet valid JSON — because the stream is still in
+    /// flight — are reported as [`Value::Null`]. Empty arguments become an
+    /// empty object, matching a provider that streams a no-argument call.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{StreamAccumulator, StreamChunk, ToolCallDelta};
+    ///
+    /// let mut acc = StreamAccumulator::new();
+    /// acc.push(&StreamChunk {
+    ///     tool_calls: vec![ToolCallDelta {
+    ///         index: 0,
+    ///         id: Some("call_1".into()),
+    ///         name: Some("get_weather".into()),
+    ///         arguments: Some(r#"{"city":"Boston"}"#.into()),
+    ///     }],
+    ///     ..Default::default()
+    /// });
+    ///
+    /// let calls = acc.tool_calls();
+    /// assert_eq!(calls[0].name, "get_weather");
+    /// assert_eq!(calls[0].input["city"], "Boston");
+    /// ```
+    pub fn tool_calls(&self) -> Vec<ToolCall> {
+        self.tool_calls
+            .iter()
+            .map(|(_, call)| ToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                input: if call.arguments.trim().is_empty() {
+                    Value::Object(Default::default())
+                } else {
+                    serde_json::from_str(&call.arguments).unwrap_or(Value::Null)
+                },
+            })
+            .collect()
+    }
+
+    /// Returns the token usage reported by the stream, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::StreamAccumulator;
+    /// assert!(StreamAccumulator::new().usage().is_none());
+    /// ```
+    pub fn usage(&self) -> Option<&Usage> {
+        self.usage.as_ref()
+    }
+
+    /// Builds a [`CompletionResponse`] equivalent to the non-streaming result.
+    ///
+    /// The response always has exactly one choice; `id` and `model` are
+    /// `None`, since streaming chunks are not required to repeat them.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{StreamAccumulator, StreamChunk};
+    ///
+    /// let mut acc = StreamAccumulator::new();
+    /// acc.push(&StreamChunk {
+    ///     delta: "done".into(),
+    ///     finish_reason: Some("stop".into()),
+    ///     ..Default::default()
+    /// });
+    ///
+    /// let resp = acc.into_response();
+    /// assert_eq!(resp.text(), "done");
+    /// assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    /// ```
+    pub fn into_response(self) -> CompletionResponse {
+        let tool_calls = self.tool_calls();
+        CompletionResponse {
+            id: None,
+            model: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant(self.text),
+                finish_reason: self.finish_reason,
+                tool_calls,
+            }],
+            usage: self.usage,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -484,5 +768,145 @@ mod tests {
             usage: None,
         };
         assert_eq!(resp.content(), None);
+    }
+
+    #[test]
+    fn stream_chunk_emptiness() {
+        assert!(StreamChunk::default().is_empty());
+        assert!(!StreamChunk::text("x").is_empty());
+        assert!(!StreamChunk {
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn accumulator_joins_text_fragments() {
+        let mut acc = StreamAccumulator::new();
+        for part in ["Hello", ", ", "world"] {
+            acc.push(&StreamChunk::text(part));
+        }
+        acc.push(&StreamChunk {
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(acc.text(), "Hello, world");
+        assert_eq!(acc.finish_reason(), Some("stop"));
+
+        let resp = acc.into_response();
+        assert_eq!(resp.text(), "Hello, world");
+        assert!(!resp.tool_use());
+    }
+
+    #[test]
+    fn accumulator_reassembles_split_tool_arguments() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 0,
+                id: Some("call_1".into()),
+                name: Some("get_weather".into()),
+                arguments: Some("{\"city\":".into()),
+            }],
+            ..Default::default()
+        });
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 0,
+                arguments: Some("\"Boston\"}".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let calls = acc.tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].input, serde_json::json!({"city": "Boston"}));
+    }
+
+    #[test]
+    fn accumulator_tracks_parallel_tool_calls_by_index() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk {
+            tool_calls: vec![
+                ToolCallDelta {
+                    index: 0,
+                    id: Some("a".into()),
+                    name: Some("first".into()),
+                    arguments: Some("{}".into()),
+                },
+                ToolCallDelta {
+                    index: 1,
+                    id: Some("b".into()),
+                    name: Some("second".into()),
+                    arguments: Some("{\"x\":".into()),
+                },
+            ],
+            ..Default::default()
+        });
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 1,
+                arguments: Some("2}".into()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+
+        let calls = acc.tool_calls();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "first");
+        assert_eq!(calls[1].input, serde_json::json!({"x": 2}));
+    }
+
+    #[test]
+    fn accumulator_treats_empty_arguments_as_empty_object() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 0,
+                id: Some("a".into()),
+                name: Some("noargs".into()),
+                arguments: None,
+            }],
+            ..Default::default()
+        });
+        assert_eq!(acc.tool_calls()[0].input, serde_json::json!({}));
+    }
+
+    #[test]
+    fn accumulator_reports_incomplete_arguments_as_null() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 0,
+                id: Some("a".into()),
+                name: Some("partial".into()),
+                arguments: Some("{\"unterminated\":".into()),
+            }],
+            ..Default::default()
+        });
+        assert_eq!(acc.tool_calls()[0].input, Value::Null);
+    }
+
+    #[test]
+    fn accumulator_keeps_last_reported_usage() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk::text("hi"));
+        acc.push(&StreamChunk {
+            usage: Some(Usage {
+                prompt_tokens: 3,
+                completion_tokens: 1,
+                total_tokens: 4,
+            }),
+            finish_reason: Some("stop".into()),
+            ..Default::default()
+        });
+        assert_eq!(acc.usage().unwrap().total_tokens, 4);
+        assert_eq!(acc.into_response().usage.unwrap().prompt_tokens, 3);
     }
 }

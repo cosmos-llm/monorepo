@@ -5,10 +5,14 @@ use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
 use crate::error::CosmosError;
-use crate::providers::Provider;
+use crate::providers::openai::parse_openai_chunk;
+use crate::providers::{stream_from_response, CompletionStream, Provider};
 use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
-const BASE_URL: &str = "https://openrouter.ai/api/v1";
+/// Default API root, used unless overridden by
+/// [`OpenRouterProvider::with_base_url`] or the `OPENROUTER_BASE_URL`
+/// environment variable.
+pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
 
 /// Provider implementation for the OpenRouter API.
 ///
@@ -48,6 +52,7 @@ const BASE_URL: &str = "https://openrouter.ai/api/v1";
 /// ```
 pub struct OpenRouterProvider {
     api_key: Option<String>,
+    base_url: String,
     referer: Option<String>,
     title: Option<String>,
     http: HttpClient,
@@ -59,7 +64,9 @@ impl OpenRouterProvider {
     /// When `api_key` is `None`, the provider falls back to the
     /// `OPENROUTER_API_KEY` or `CLLM__OPENROUTER__API_KEY` environment
     /// variables. Attribution headers default to `OPENROUTER_REFERER` and
-    /// `OPENROUTER_TITLE` when those are set.
+    /// `OPENROUTER_TITLE` when those are set. The API root defaults to
+    /// [`DEFAULT_BASE_URL`] unless `OPENROUTER_BASE_URL` or
+    /// `CLLM__OPENROUTER__BASE_URL` is set.
     ///
     /// # Examples
     ///
@@ -73,10 +80,49 @@ impl OpenRouterProvider {
             .or_else(|| std::env::var("CLLM__OPENROUTER__API_KEY").ok());
         Self {
             api_key: key,
+            base_url: std::env::var("OPENROUTER_BASE_URL")
+                .or_else(|_| std::env::var("CLLM__OPENROUTER__BASE_URL"))
+                .unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned()),
             referer: std::env::var("OPENROUTER_REFERER").ok(),
             title: std::env::var("OPENROUTER_TITLE").ok(),
             http: HttpClient::new(),
         }
+    }
+
+    /// Points the provider at a different API root (builder pattern).
+    ///
+    /// Useful for OpenRouter-compatible proxies and for pointing tests at a
+    /// mock server. Any trailing slash is trimmed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    ///
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+    ///     .with_base_url("http://localhost:8080/api/v1");
+    /// assert_eq!(provider.base_url(), "http://localhost:8080/api/v1");
+    /// ```
+    pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
+        let url = base_url.into();
+        self.base_url = url.trim_end_matches('/').to_owned();
+        self
+    }
+
+    /// Returns the API root this provider sends requests to.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::{OpenRouterProvider, DEFAULT_BASE_URL};
+    ///
+    /// # std::env::remove_var("OPENROUTER_BASE_URL");
+    /// # std::env::remove_var("CLLM__OPENROUTER__BASE_URL");
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()));
+    /// assert_eq!(provider.base_url(), DEFAULT_BASE_URL);
+    /// ```
+    pub fn base_url(&self) -> &str {
+        &self.base_url
     }
 
     /// Sets the `HTTP-Referer` attribution header (builder pattern).
@@ -127,6 +173,42 @@ impl OpenRouterProvider {
             req = req.header("X-Title", title);
         }
         req
+    }
+
+    /// Builds the JSON request body for the chat completions endpoint.
+    ///
+    /// Mirrors OpenAI's schema, including the `stream_options.include_usage`
+    /// flag that makes the final streamed chunk carry token counts.
+    fn build_body(req: &CompletionRequest, stream: bool) -> Value {
+        let mut body = json!({
+            "model": req.model,
+            "messages": req.messages,
+        });
+
+        if let Some(t) = req.temperature {
+            body["temperature"] = json!(t);
+        }
+        if let Some(n) = req.max_tokens {
+            body["max_tokens"] = json!(n);
+        }
+        if let Some(p) = req.top_p {
+            body["top_p"] = json!(p);
+        }
+        if let Some(ref stop) = req.stop {
+            body["stop"] = json!(stop);
+        }
+        if let Some(ref tools) = req.tools {
+            body["tools"] = json!(tools);
+        }
+        if let Some(ref choice) = req.tool_choice {
+            body["tool_choice"] = json!(choice);
+        }
+        if stream {
+            body["stream"] = json!(true);
+            body["stream_options"] = json!({ "include_usage": true });
+        }
+
+        body
     }
 
     fn map_response(body: Value) -> Result<CompletionResponse, CosmosError> {
@@ -220,33 +302,13 @@ impl Provider for OpenRouterProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionResponse, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
+            let body = Self::build_body(req, false);
 
-            let mut body = json!({
-                "model": req.model,
-                "messages": req.messages,
-            });
-
-            if let Some(t) = req.temperature {
-                body["temperature"] = json!(t);
-            }
-            if let Some(n) = req.max_tokens {
-                body["max_tokens"] = json!(n);
-            }
-            if let Some(p) = req.top_p {
-                body["top_p"] = json!(p);
-            }
-            if let Some(ref stop) = req.stop {
-                body["stop"] = json!(stop);
-            }
-            if let Some(ref tools) = req.tools {
-                body["tools"] = json!(tools);
-            }
-            if let Some(ref choice) = req.tool_choice {
-                body["tool_choice"] = json!(choice);
-            }
-
-            let request =
-                self.authorize(self.http.post(format!("{BASE_URL}/chat/completions")), key);
+            let request = self.authorize(
+                self.http
+                    .post(format!("{}/chat/completions", self.base_url)),
+                key,
+            );
             let resp = request.json(&body).send().await?;
 
             let status = resp.status().as_u16();
@@ -260,13 +322,44 @@ impl Provider for OpenRouterProvider {
         })
     }
 
+    fn stream_completion<'a>(
+        &'a self,
+        req: &'a CompletionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<CompletionStream, CosmosError>> + Send + 'a>> {
+        Box::pin(async move {
+            let key = self.resolved_key()?;
+            let body = Self::build_body(req, true);
+
+            let request = self
+                .authorize(
+                    self.http
+                        .post(format!("{}/chat/completions", self.base_url)),
+                    key,
+                )
+                .header("accept", "text/event-stream");
+            let resp = request.json(&body).send().await?;
+
+            let status = resp.status().as_u16();
+            if !(200..300).contains(&status) {
+                let json: Value = resp.json().await.unwrap_or(Value::Null);
+                return Err(Self::handle_error(status, &json));
+            }
+
+            Ok(stream_from_response(resp, parse_openai_chunk))
+        })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
     fn models<'a>(
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             // OpenRouter's model catalogue is public; the key is sent when
             // available so per-account model visibility is respected.
-            let mut request = self.http.get(format!("{BASE_URL}/models"));
+            let mut request = self.http.get(format!("{}/models", self.base_url));
             if let Some(key) = self.api_key.as_deref() {
                 request = self.authorize(request, key);
             }
@@ -300,6 +393,7 @@ mod tests {
     fn provider(key: Option<&str>) -> OpenRouterProvider {
         OpenRouterProvider {
             api_key: key.map(str::to_owned),
+            base_url: DEFAULT_BASE_URL.to_owned(),
             referer: None,
             title: None,
             http: HttpClient::new(),
@@ -307,8 +401,20 @@ mod tests {
     }
 
     #[test]
-    fn does_not_claim_streaming_until_implemented() {
-        assert!(!provider(Some("sk-or-test")).supports_streaming());
+    fn reports_streaming_support() {
+        assert!(provider(Some("sk-or-test")).supports_streaming());
+    }
+
+    #[test]
+    fn build_body_sets_stream_flags_only_when_streaming() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+
+        let plain = OpenRouterProvider::build_body(&req, false);
+        assert!(plain.get("stream").is_none());
+
+        let streamed = OpenRouterProvider::build_body(&req, true);
+        assert_eq!(streamed["stream"], serde_json::json!(true));
+        assert_eq!(streamed["stream_options"]["include_usage"], true);
     }
 
     #[test]

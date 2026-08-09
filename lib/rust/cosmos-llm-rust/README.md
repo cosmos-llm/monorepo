@@ -6,13 +6,12 @@ A unified Rust client for multiple LLM providers. Part of the [Cosmos-LLM](https
 
 | Name | Completion | Tools | Streaming | Models |
 |---|---|---|---|---|
-| `openai` | ✓ | ✓ | — | ✓ |
-| `anthropic` | ✓ | ✓ | — | ✓ (static list) |
-| `openrouter` | ✓ | ✓ | — | ✓ |
+| `openai` | ✓ | ✓ | ✓ | ✓ |
+| `anthropic` | ✓ | ✓ | ✓ | ✓ (static list) |
+| `openrouter` | ✓ | ✓ | ✓ | ✓ |
 
-Streaming is not implemented yet. `Client::can_stream()` reports `false` for
-every provider, and will start reporting `true` per-provider as streaming
-lands.
+`Client::can_stream()` reports whether the active provider implements
+streaming.
 
 ## Installation
 
@@ -54,6 +53,71 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+## Streaming
+
+`Client::stream` returns a `Stream` of `StreamChunk`s as the model generates
+them:
+
+```rust
+use cosmos_llm::Client;
+use futures_util::StreamExt;
+use std::io::Write;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let client = Client::new("openai", std::env::var("OPENAI_API_KEY")?)?
+        .with_model("gpt-4o");
+
+    let mut stream = client.stream("Write a haiku about Rust").await?;
+    while let Some(chunk) = stream.next().await {
+        print!("{}", chunk?.delta);
+        std::io::stdout().flush()?;
+    }
+
+    Ok(())
+}
+```
+
+Use `Client::stream_completion` for full control over the request, and
+`StreamAccumulator` to fold the chunks back into a `CompletionResponse` — the
+same shape a non-streaming call returns, complete with assembled tool calls and
+token usage:
+
+```rust
+use cosmos_llm::{Client, CompletionRequest, Message, StreamAccumulator};
+use futures_util::StreamExt;
+
+async fn run(client: Client) -> Result<(), Box<dyn std::error::Error>> {
+    let req = CompletionRequest::new("gpt-4o", vec![Message::user("Hi")]);
+    let mut stream = client.stream_completion(req).await?;
+    let mut acc = StreamAccumulator::new();
+
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        print!("{}", chunk.delta);
+        acc.push(&chunk);
+    }
+
+    let response = acc.into_response();
+    println!("{:?}", response.usage);
+    Ok(())
+}
+```
+
+`Client::stream_to_completion` wraps that loop: it hands each chunk to a
+callback for live output and returns the assembled response.
+
+Streamed tool calls arrive as `ToolCallDelta` fragments, since providers send
+tool arguments as partial JSON text. The accumulator reassembles them, so a
+tool-calling loop written against `CompletionResponse` works unchanged with
+either mode.
+
+See `examples/streaming.rs` for a runnable version:
+
+```
+OPENAI_API_KEY=sk-... cargo run --example streaming
+```
+
 ## Configuration
 
 ### Programmatic
@@ -80,6 +144,34 @@ export CLLM__OPENAI__MODEL=gpt-4o
 
 Each provider also accepts its conventional variable — `OPENAI_API_KEY`,
 `ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`.
+
+### Custom endpoints
+
+Every provider's API root can be overridden, either per-client or by
+environment variable. The provider name still selects the wire format, so any
+OpenAI-compatible server works through the `openai` provider:
+
+```rust
+use cosmos_llm::Client;
+
+// A local vLLM or llama.cpp server speaking the OpenAI protocol.
+let client = Client::new_with_base_url(
+    "openai",
+    "not-checked-locally",
+    "http://localhost:8000/v1",
+)?
+.with_model("meta-llama/Llama-3-8b");
+```
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8000/v1
+# or: export CLLM__OPENAI__BASE_URL=http://localhost:8000/v1
+```
+
+An explicit `with_base_url` call takes precedence over the environment. At the
+provider level, `OpenAiProvider::with_base_url` (and the equivalent on the
+other two) does the same thing, and `Client::with_provider_at` switches an
+existing client to a provider at a custom root.
 
 ### Reusing opencode credentials
 

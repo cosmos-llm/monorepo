@@ -80,8 +80,7 @@ fn error_display() {
 fn resolve_openai() {
     let p = cosmos_llm::providers::resolve("openai", Some("key"));
     assert!(p.is_ok());
-    // Streaming is not implemented for any provider yet.
-    assert!(!p.unwrap().supports_streaming());
+    assert!(p.unwrap().supports_streaming());
 }
 
 #[test]
@@ -94,7 +93,7 @@ fn resolve_anthropic() {
 fn resolve_openrouter() {
     let p = cosmos_llm::providers::resolve("openrouter", Some("sk-or-test"));
     assert!(p.is_ok());
-    assert!(!p.unwrap().supports_streaming());
+    assert!(p.unwrap().supports_streaming());
 }
 
 #[test]
@@ -200,4 +199,101 @@ async fn anthropic_models_static_list() {
     let models = p.models().await.unwrap();
     assert!(!models.is_empty());
     assert!(models.iter().any(|m| m.contains("claude")));
+}
+
+// ── Streaming ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn all_providers_report_streaming_support() {
+    for name in ["openai", "anthropic", "openrouter"] {
+        let client = Client::new(name, "key").unwrap();
+        assert!(client.can_stream(), "{name} should support streaming");
+    }
+}
+
+#[tokio::test]
+async fn stream_without_model_returns_config_error() {
+    let client = Client::new("openai", "sk-test").unwrap();
+    assert!(matches!(
+        client.stream("hello").await,
+        Err(CosmosError::Configuration(_))
+    ));
+}
+
+/// Decodes a raw SSE body the way the streaming layer does, so a wire-format
+/// change is caught end to end rather than only at the parser boundary.
+///
+/// The body is fed in deliberately awkward slices — splitting events across
+/// reads — to exercise the buffering that a real socket makes unavoidable.
+fn decode_events(body: &str, slice_len: usize) -> Vec<String> {
+    use cosmos_llm::sse::SseDecoder;
+
+    let mut decoder = SseDecoder::new();
+    let mut events = Vec::new();
+    for slice in body.as_bytes().chunks(slice_len) {
+        for event in decoder.push(slice) {
+            if event.is_done() {
+                return events;
+            }
+            events.push(event.data);
+        }
+    }
+    events
+}
+
+#[test]
+fn openai_stream_body_accumulates_into_response() {
+    use cosmos_llm::StreamAccumulator;
+
+    let body = concat!(
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"The capital \"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"is Paris.\"}}]}\n\n",
+        "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":4,\"total_tokens\":11}}\n\n",
+        "data: [DONE]\n\n",
+    );
+
+    // Slice sizes chosen to land mid-event, mid-JSON, and mid-terminator.
+    for slice_len in [1, 7, 64, body.len()] {
+        let mut acc = StreamAccumulator::new();
+        for data in decode_events(body, slice_len) {
+            let value: serde_json::Value = serde_json::from_str(&data).unwrap();
+            let choice = &value["choices"][0];
+            acc.push(&cosmos_llm::StreamChunk {
+                delta: choice["delta"]["content"].as_str().unwrap_or("").to_owned(),
+                finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
+                tool_calls: vec![],
+                usage: None,
+            });
+        }
+
+        let resp = acc.into_response();
+        assert_eq!(
+            resp.text(),
+            "The capital is Paris.",
+            "slice_len {slice_len}"
+        );
+        assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+}
+
+#[test]
+fn anthropic_stream_body_decodes_every_event() {
+    let body = concat!(
+        "event: message_start\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n",
+        "event: ping\n",
+        "data: {\"type\":\"ping\"}\n\n",
+        "event: content_block_delta\n",
+        "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}\n\n",
+        "event: message_stop\n",
+        "data: {\"type\":\"message_stop\"}\n\n",
+    );
+
+    for slice_len in [1, 5, 33, body.len()] {
+        let events = decode_events(body, slice_len);
+        assert_eq!(events.len(), 4, "slice_len {slice_len}");
+        assert!(events[2].contains("\"text\":\"Hi\""));
+    }
 }
