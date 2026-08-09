@@ -90,9 +90,93 @@ fn resolve_anthropic() {
 }
 
 #[test]
+fn resolve_openrouter() {
+    let p = cosmos_llm::providers::resolve("openrouter", Some("sk-or-test"));
+    assert!(p.is_ok());
+    assert!(p.unwrap().supports_streaming());
+}
+
+#[test]
+fn resolve_is_case_insensitive() {
+    assert!(cosmos_llm::providers::resolve("OpenRouter", Some("sk-or-test")).is_ok());
+}
+
+#[test]
 fn resolve_unknown() {
     let p = cosmos_llm::providers::resolve("grok", None);
     assert!(matches!(p, Err(CosmosError::UnsupportedProvider(_))));
+}
+
+// ── opencode auth interop ─────────────────────────────────────────────────────
+
+/// Writes an `auth.json` under a unique temp dir and returns its path.
+fn write_auth_json(name: &str, contents: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("cosmos-llm-test-{name}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("auth.json");
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn config_loads_keys_from_opencode_auth_file() {
+    let path = write_auth_json(
+        "load",
+        r#"{
+            "openrouter": { "type": "api", "key": "sk-or-from-opencode" },
+            "anthropic":  { "type": "oauth", "access": "tok" }
+        }"#,
+    );
+
+    let mut config = Config::new();
+    let loaded = config.load_opencode_auth_from(&path).unwrap();
+
+    assert_eq!(loaded, vec!["openrouter"]);
+    assert_eq!(config.api_key("openrouter"), Some("sk-or-from-opencode"));
+    // OAuth credentials are not reusable, so nothing is stored for anthropic.
+    assert_eq!(config.api_key("anthropic"), None);
+
+    let client = Client::from_config(config, "openrouter");
+    assert!(client.is_ok());
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn opencode_auth_does_not_override_explicit_keys() {
+    let path = write_auth_json(
+        "no-override",
+        r#"{ "openrouter": { "type": "api", "key": "sk-or-from-opencode" } }"#,
+    );
+
+    let mut config = Config::new();
+    config.set_api_key("openrouter", "sk-or-explicit");
+    let loaded = config.load_opencode_auth_from(&path).unwrap();
+
+    assert!(loaded.is_empty());
+    assert_eq!(config.api_key("openrouter"), Some("sk-or-explicit"));
+
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn opencode_auth_missing_explicit_path_errors() {
+    let mut config = Config::new();
+    let err = config
+        .load_opencode_auth_from("/nonexistent/opencode/auth.json")
+        .unwrap_err();
+    assert!(matches!(err, CosmosError::Configuration(_)));
+}
+
+#[test]
+fn opencode_auth_invalid_json_errors() {
+    let path = write_auth_json("invalid", "{ this is not json");
+
+    let mut config = Config::new();
+    let err = config.load_opencode_auth_from(&path).unwrap_err();
+    assert!(matches!(err, CosmosError::Json(_)));
+
+    std::fs::remove_file(&path).ok();
 }
 
 // ── Async: no model error ─────────────────────────────────────────────────────

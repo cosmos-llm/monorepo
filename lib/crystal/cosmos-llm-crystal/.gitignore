@@ -1,0 +1,12 @@
+/docs/
+/lib/
+/bin/
+/.shards/
+*.dwarf
+
+# Devenv
+.devenv*
+devenv.local.nix
+
+# direnv
+.direnv

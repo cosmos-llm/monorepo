@@ -1,5 +1,6 @@
 pub mod anthropic;
 pub mod openai;
+pub mod openrouter;
 
 use crate::error::CosmosError;
 use crate::types::{CompletionRequest, CompletionResponse};
@@ -32,7 +33,12 @@ pub trait Provider: Send + Sync {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, CosmosError>> + Send + 'a>>;
 
-    /// Returns `true` if this provider supports streaming completions.
+    /// Returns `true` if this provider implements streaming completions.
+    ///
+    /// This reports what the provider can actually do here, not what the
+    /// upstream API offers. No backend implements streaming yet, so every
+    /// provider currently returns `false`; override this only when adding a
+    /// working streaming method alongside it.
     fn supports_streaming(&self) -> bool {
         false
     }
@@ -54,7 +60,7 @@ pub trait Provider: Send + Sync {
 /// use cosmos_llm::providers::resolve;
 ///
 /// let provider = resolve("openai", Some("sk-test")).unwrap();
-/// assert!(provider.supports_streaming());
+/// assert!(!provider.supports_streaming());
 /// ```
 pub fn resolve(name: &str, api_key: Option<&str>) -> Result<Box<dyn Provider>, CosmosError> {
     match name.to_lowercase().as_str() {
@@ -62,6 +68,9 @@ pub fn resolve(name: &str, api_key: Option<&str>) -> Result<Box<dyn Provider>, C
             api_key.map(str::to_owned),
         ))),
         "anthropic" => Ok(Box::new(anthropic::AnthropicProvider::new(
+            api_key.map(str::to_owned),
+        ))),
+        "openrouter" => Ok(Box::new(openrouter::OpenRouterProvider::new(
             api_key.map(str::to_owned),
         ))),
         other => Err(CosmosError::UnsupportedProvider(other.to_owned())),

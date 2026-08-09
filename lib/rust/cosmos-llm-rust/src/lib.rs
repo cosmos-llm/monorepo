@@ -27,6 +27,7 @@
 //! |---|---|
 //! | `OPENAI_API_KEY` or `CLLM__OPENAI__API_KEY` | OpenAI |
 //! | `ANTHROPIC_API_KEY` or `CLLM__ANTHROPIC__API_KEY` | Anthropic |
+//! | `OPENROUTER_API_KEY` or `CLLM__OPENROUTER__API_KEY` | OpenRouter |
 //!
 //! ## Supported providers
 //!
@@ -34,10 +35,27 @@
 //! |---|---|---|---|
 //! | `openai` | ✓ | ✓ | ✓ |
 //! | `anthropic` | ✓ | — | ✓ (static list) |
+//! | `openrouter` | ✓ | ✓ | ✓ |
+//!
+//! ## Reusing opencode credentials
+//!
+//! If you already ran `opencode auth login`, those keys can be loaded instead
+//! of re-exporting them. This is opt-in — [`Config::new`] never reads the file.
+//!
+//! ```no_run
+//! use cosmos_llm::{Client, Config};
+//!
+//! let mut config = Config::new();
+//! config.load_opencode_auth().unwrap();
+//! let client = Client::from_config(config, "openrouter").unwrap();
+//! ```
+//!
+//! See the [`opencode`] module for details.
 
 pub mod client;
 pub mod config;
 pub mod error;
+pub mod opencode;
 pub mod providers;
 pub mod types;
 

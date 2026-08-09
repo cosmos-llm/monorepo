@@ -1,10 +1,10 @@
 # Cosmos LLM
 
-A monorepo of libraries for integrating Large Language Models across Ruby, Rust, and JavaScript.
+A monorepo of libraries for integrating Large Language Models across Ruby, Rust, JavaScript, and Crystal.
 
 Each language has a parallel set of libraries that share a common architecture: a unified client, a context DSL, a tool/function-calling layer, and a virtual filesystem abstraction.
 
-The Ruby set is the most developed, followed by the Rust crate, and then the JS crate.
+The Ruby set is the most developed, followed by the Rust crates, then the JS and Crystal clients.
 
 ## Libraries
 
@@ -32,6 +32,12 @@ The Ruby set is the most developed, followed by the Rust crate, and then the JS 
 | Package | Purpose |
 |---------|---------|
 | `cosmos-llm` | TypeScript/JavaScript client for OpenAI and Anthropic |
+
+### Crystal (`lib/crystal/`)
+
+| Shard | Purpose |
+|-------|---------|
+| `cosmos-llm` | Client for OpenAI and Anthropic with normalized tool calling; stdlib-only, no third-party dependencies |
 
 ## Architecture
 

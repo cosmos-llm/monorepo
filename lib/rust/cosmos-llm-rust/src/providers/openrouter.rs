@@ -8,61 +8,125 @@ use crate::error::CosmosError;
 use crate::providers::Provider;
 use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
-const BASE_URL: &str = "https://api.openai.com/v1";
+const BASE_URL: &str = "https://openrouter.ai/api/v1";
 
-/// Provider implementation for the OpenAI API.
+/// Provider implementation for the OpenRouter API.
 ///
-/// Supports chat completions, embeddings, streaming, and model listing.
-/// Reads the API key from the `OPENAI_API_KEY` or `CLLM__OPENAI__API_KEY`
-/// environment variable when none is supplied at construction.
+/// OpenRouter proxies many upstream models behind an OpenAI-compatible
+/// interface, so request and response shapes match
+/// [`OpenAiProvider`](crate::providers::openai::OpenAiProvider). Model
+/// identifiers are namespaced by vendor, e.g. `"anthropic/claude-3.5-sonnet"`
+/// or `"openai/gpt-4o"`.
+///
+/// Reads the API key from `OPENROUTER_API_KEY` or
+/// `CLLM__OPENROUTER__API_KEY` when none is supplied at construction.
+///
+/// # Attribution headers
+///
+/// OpenRouter uses the optional `HTTP-Referer` and `X-Title` headers to
+/// attribute traffic on public leaderboards. Set them with
+/// [`OpenRouterProvider::with_referer`] and [`OpenRouterProvider::with_title`],
+/// or via the `OPENROUTER_REFERER` / `OPENROUTER_TITLE` environment
+/// variables. Both are optional and omitted when unset.
 ///
 /// # Examples
 ///
 /// ```no_run
-/// use cosmos_llm::providers::openai::OpenAiProvider;
+/// use cosmos_llm::providers::openrouter::OpenRouterProvider;
 /// use cosmos_llm::providers::Provider;
 /// use cosmos_llm::types::{CompletionRequest, Message};
 ///
 /// # tokio_test::block_on(async {
-/// let provider = OpenAiProvider::new(Some("sk-test".into()));
-/// let req = CompletionRequest::new("gpt-4o", vec![Message::user("Hello")]);
+/// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+///     .with_title("my-app");
+/// let req = CompletionRequest::new(
+///     "anthropic/claude-3.5-sonnet",
+///     vec![Message::user("Hello")],
+/// );
 /// // let resp = provider.completion(&req).await.unwrap();
 /// # })
 /// ```
-pub struct OpenAiProvider {
+pub struct OpenRouterProvider {
     api_key: Option<String>,
+    referer: Option<String>,
+    title: Option<String>,
     http: HttpClient,
 }
 
-impl OpenAiProvider {
-    /// Creates a new [`OpenAiProvider`].
+impl OpenRouterProvider {
+    /// Creates a new [`OpenRouterProvider`].
     ///
     /// When `api_key` is `None`, the provider falls back to the
-    /// `OPENAI_API_KEY` or `CLLM__OPENAI__API_KEY` environment variables.
+    /// `OPENROUTER_API_KEY` or `CLLM__OPENROUTER__API_KEY` environment
+    /// variables. Attribution headers default to `OPENROUTER_REFERER` and
+    /// `OPENROUTER_TITLE` when those are set.
     ///
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::providers::openai::OpenAiProvider;
-    /// let provider = OpenAiProvider::new(None);
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    /// let provider = OpenRouterProvider::new(None);
     /// ```
     pub fn new(api_key: Option<String>) -> Self {
         let key = api_key
-            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
-            .or_else(|| std::env::var("CLLM__OPENAI__API_KEY").ok());
+            .or_else(|| std::env::var("OPENROUTER_API_KEY").ok())
+            .or_else(|| std::env::var("CLLM__OPENROUTER__API_KEY").ok());
         Self {
             api_key: key,
+            referer: std::env::var("OPENROUTER_REFERER").ok(),
+            title: std::env::var("OPENROUTER_TITLE").ok(),
             http: HttpClient::new(),
         }
+    }
+
+    /// Sets the `HTTP-Referer` attribution header (builder pattern).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+    ///     .with_referer("https://example.com");
+    /// ```
+    pub fn with_referer(mut self, referer: impl Into<String>) -> Self {
+        self.referer = Some(referer.into());
+        self
+    }
+
+    /// Sets the `X-Title` attribution header (builder pattern).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+    ///     .with_title("my-app");
+    /// ```
+    pub fn with_title(mut self, title: impl Into<String>) -> Self {
+        self.title = Some(title.into());
+        self
     }
 
     fn resolved_key(&self) -> Result<&str, CosmosError> {
         self.api_key.as_deref().ok_or_else(|| {
             CosmosError::Authentication(
-                "OpenAI API key not set. Export OPENAI_API_KEY or CLLM__OPENAI__API_KEY."
+                "OpenRouter API key not set. Export OPENROUTER_API_KEY or \
+                 CLLM__OPENROUTER__API_KEY."
                     .to_owned(),
             )
         })
+    }
+
+    /// Applies the bearer token and optional attribution headers to a request.
+    fn authorize(&self, mut req: reqwest::RequestBuilder, key: &str) -> reqwest::RequestBuilder {
+        req = req.bearer_auth(key);
+        if let Some(ref referer) = self.referer {
+            req = req.header("HTTP-Referer", referer);
+        }
+        if let Some(ref title) = self.title {
+            req = req.header("X-Title", title);
+        }
+        req
     }
 
     fn map_response(body: Value) -> Result<CompletionResponse, CosmosError> {
@@ -127,22 +191,29 @@ impl OpenAiProvider {
         })
     }
 
+    /// Maps an error response to a [`CosmosError`].
+    ///
+    /// OpenRouter reports upstream provider failures with its own status code
+    /// and an `error.message` body, matching OpenAI's error envelope. A 402 is
+    /// returned when the account is out of credits.
     fn handle_error(status: u16, body: &Value) -> CosmosError {
         let msg = body["error"]["message"]
             .as_str()
             .unwrap_or("unknown error")
             .to_owned();
         match status {
-            401 => CosmosError::Authentication(msg),
+            401 | 403 => CosmosError::Authentication(msg),
+            402 => CosmosError::InsufficientQuota(msg),
+            404 => CosmosError::NotFound(msg),
             429 => CosmosError::RateLimit(msg),
-            400 | 404 => CosmosError::InvalidRequest(msg),
+            400 | 422 => CosmosError::InvalidRequest(msg),
             s if s >= 500 => CosmosError::Server(msg),
             _ => CosmosError::InvalidResponse(format!("unexpected status {status}: {msg}")),
         }
     }
 }
 
-impl Provider for OpenAiProvider {
+impl Provider for OpenRouterProvider {
     fn completion<'a>(
         &'a self,
         req: &'a CompletionRequest,
@@ -174,13 +245,9 @@ impl Provider for OpenAiProvider {
                 body["tool_choice"] = json!(choice);
             }
 
-            let resp = self
-                .http
-                .post(format!("{BASE_URL}/chat/completions"))
-                .bearer_auth(key)
-                .json(&body)
-                .send()
-                .await?;
+            let request =
+                self.authorize(self.http.post(format!("{BASE_URL}/chat/completions")), key);
+            let resp = request.json(&body).send().await?;
 
             let status = resp.status().as_u16();
             let json: Value = resp.json().await?;
@@ -197,14 +264,14 @@ impl Provider for OpenAiProvider {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
-            let key = self.resolved_key()?;
+            // OpenRouter's model catalogue is public; the key is sent when
+            // available so per-account model visibility is respected.
+            let mut request = self.http.get(format!("{BASE_URL}/models"));
+            if let Some(key) = self.api_key.as_deref() {
+                request = self.authorize(request, key);
+            }
 
-            let resp = self
-                .http
-                .get(format!("{BASE_URL}/models"))
-                .bearer_auth(key)
-                .send()
-                .await?;
+            let resp = request.send().await?;
 
             let status = resp.status().as_u16();
             let json: Value = resp.json().await?;
@@ -228,27 +295,43 @@ impl Provider for OpenAiProvider {
 mod tests {
     use super::*;
 
+    /// Builds a provider with no environment fallback, so tests do not depend
+    /// on the developer's shell.
+    fn provider(key: Option<&str>) -> OpenRouterProvider {
+        OpenRouterProvider {
+            api_key: key.map(str::to_owned),
+            referer: None,
+            title: None,
+            http: HttpClient::new(),
+        }
+    }
+
     #[test]
     fn does_not_claim_streaming_until_implemented() {
-        let p = OpenAiProvider::new(None);
-        assert!(!p.supports_streaming());
+        assert!(!provider(Some("sk-or-test")).supports_streaming());
     }
 
     #[test]
     fn missing_key_yields_auth_error() {
-        // Clear both env vars to ensure no key leaks in.
-        std::env::remove_var("OPENAI_API_KEY");
-        std::env::remove_var("CLLM__OPENAI__API_KEY");
-        let p = OpenAiProvider::new(None);
-        let err = p.resolved_key().unwrap_err();
+        let err = provider(None).resolved_key().unwrap_err();
         assert!(matches!(err, CosmosError::Authentication(_)));
+        assert!(err.to_string().contains("OPENROUTER_API_KEY"));
     }
 
     #[test]
-    fn map_response_parses_openai_body() {
+    fn builder_sets_attribution_headers() {
+        let p = provider(Some("sk-or-test"))
+            .with_referer("https://example.com")
+            .with_title("my-app");
+        assert_eq!(p.referer.as_deref(), Some("https://example.com"));
+        assert_eq!(p.title.as_deref(), Some("my-app"));
+    }
+
+    #[test]
+    fn map_response_parses_openrouter_body() {
         let body = serde_json::json!({
-            "id": "chatcmpl-1",
-            "model": "gpt-4o",
+            "id": "gen-1",
+            "model": "anthropic/claude-3.5-sonnet",
             "choices": [{
                 "index": 0,
                 "message": { "role": "assistant", "content": "Hello!" },
@@ -260,8 +343,9 @@ mod tests {
                 "total_tokens": 15
             }
         });
-        let resp = OpenAiProvider::map_response(body).unwrap();
+        let resp = OpenRouterProvider::map_response(body).unwrap();
         assert_eq!(resp.content(), Some("Hello!"));
+        assert_eq!(resp.model.as_deref(), Some("anthropic/claude-3.5-sonnet"));
         assert!(!resp.tool_use());
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
     }
@@ -269,8 +353,8 @@ mod tests {
     #[test]
     fn map_response_parses_tool_calls() {
         let body = serde_json::json!({
-            "id": "chatcmpl-2",
-            "model": "gpt-4o",
+            "id": "gen-2",
+            "model": "openai/gpt-4o",
             "choices": [{
                 "index": 0,
                 "message": {
@@ -286,15 +370,48 @@ mod tests {
                     }]
                 },
                 "finish_reason": "tool_calls"
-            }],
-            "usage": { "prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20 }
+            }]
         });
-        let resp = OpenAiProvider::map_response(body).unwrap();
+        let resp = OpenRouterProvider::map_response(body).unwrap();
         assert!(resp.tool_use());
         let calls = resp.tool_calls();
         assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].input, serde_json::json!({"city": "Boston"}));
+    }
+
+    #[test]
+    fn map_response_missing_choices_is_invalid() {
+        let err = OpenRouterProvider::map_response(serde_json::json!({"id": "x"})).unwrap_err();
+        assert!(matches!(err, CosmosError::InvalidResponse(_)));
+    }
+
+    #[test]
+    fn handle_error_maps_status_codes() {
+        let body = serde_json::json!({"error": {"message": "nope"}});
+        assert!(matches!(
+            OpenRouterProvider::handle_error(401, &body),
+            CosmosError::Authentication(_)
+        ));
+        assert!(matches!(
+            OpenRouterProvider::handle_error(402, &body),
+            CosmosError::InsufficientQuota(_)
+        ));
+        assert!(matches!(
+            OpenRouterProvider::handle_error(404, &body),
+            CosmosError::NotFound(_)
+        ));
+        assert!(matches!(
+            OpenRouterProvider::handle_error(429, &body),
+            CosmosError::RateLimit(_)
+        ));
+        assert!(matches!(
+            OpenRouterProvider::handle_error(400, &body),
+            CosmosError::InvalidRequest(_)
+        ));
+        assert!(matches!(
+            OpenRouterProvider::handle_error(503, &body),
+            CosmosError::Server(_)
+        ));
     }
 }

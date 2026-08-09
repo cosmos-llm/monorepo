@@ -1,0 +1,18 @@
+name: cosmos-llm
+version: 0.1.0
+
+authors:
+  - Durable Programming, LLC Team <team@durableprogramming.com>
+
+description: |
+  Unified client for multiple LLM providers (OpenAI, Anthropic, and more).
+
+crystal: ">= 1.10.0"
+
+license: MIT
+
+repository: https://github.com/durableprogramming/cosmos-llm-crystal
+
+targets: {}
+
+development_dependencies: {}

@@ -8,6 +8,7 @@ A unified Rust client for multiple LLM providers. Part of the [Cosmos-LLM](https
 |---|---|---|---|
 | `openai` | ✓ | ✓ | ✓ |
 | `anthropic` | ✓ | — | ✓ (static list) |
+| `openrouter` | ✓ | ✓ | ✓ |
 
 ## Installation
 
@@ -69,7 +70,58 @@ let client = Client::from_config(config, "anthropic")?;
 ```bash
 export CLLM__OPENAI__API_KEY=sk-...
 export CLLM__ANTHROPIC__API_KEY=sk-ant-...
+export CLLM__OPENROUTER__API_KEY=sk-or-...
 export CLLM__OPENAI__MODEL=gpt-4o
+```
+
+Each provider also accepts its conventional variable — `OPENAI_API_KEY`,
+`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`.
+
+### Reusing opencode credentials
+
+If you already authenticated providers with `opencode auth login`, those keys
+can be loaded from `~/.local/share/opencode/auth.json` instead of being
+re-exported:
+
+```rust
+use cosmos_llm::{Client, Config};
+
+let mut config = Config::new();
+let loaded = config.load_opencode_auth()?;   // -> ["openrouter"]
+
+let client = Client::from_config(config, "openrouter")?
+    .with_model("anthropic/claude-3.5-sonnet");
+```
+
+This is opt-in; `Config::new()` never reads the file. Keys already set — from
+the environment or `set_api_key` — take precedence and are not overwritten.
+Only `api`-type entries are used; opencode's OAuth credentials are skipped
+because it refreshes those itself. A missing file is not an error. Use
+`load_opencode_auth_from(path)` to read a specific file.
+
+## OpenRouter
+
+OpenRouter namespaces models by vendor and exposes an OpenAI-compatible API:
+
+```rust
+use cosmos_llm::Client;
+
+let client = Client::new("openrouter", std::env::var("OPENROUTER_API_KEY")?)?
+    .with_model("anthropic/claude-3.5-sonnet");
+
+let text = client.complete("What is the capital of France?").await?;
+```
+
+To appear on OpenRouter's public leaderboards, set the optional attribution
+headers via the provider builder or the `OPENROUTER_REFERER` / `OPENROUTER_TITLE`
+environment variables:
+
+```rust
+use cosmos_llm::providers::openrouter::OpenRouterProvider;
+
+let provider = OpenRouterProvider::new(None)
+    .with_referer("https://example.com")
+    .with_title("my-app");
 ```
 
 ## Development Setup
