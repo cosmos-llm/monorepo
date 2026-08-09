@@ -12,7 +12,8 @@ const BASE_URL: &str = "https://api.openai.com/v1";
 
 /// Provider implementation for the OpenAI API.
 ///
-/// Supports chat completions, embeddings, streaming, and model listing.
+/// Supports chat completions, tool calling, and model listing. Streaming is
+/// not implemented yet.
 /// Reads the API key from the `OPENAI_API_KEY` or `CLLM__OPENAI__API_KEY`
 /// environment variable when none is supplied at construction.
 ///

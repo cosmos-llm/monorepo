@@ -8,12 +8,18 @@
 - `Client` with `complete`, `completion`, `chat`, and `models` methods.
 - `Config` with env-variable loading (`CLLM__<PROVIDER>__<SETTING>`).
 - `Provider` trait for adding new backends.
-- OpenAI provider: chat completions, embeddings, model listing, streaming flag.
+- OpenAI provider: chat completions, tool calling, model listing.
 - Anthropic provider: chat completions with system message support, static model list.
 - `CompletionRequest` builder API (`with_temperature`, `with_max_tokens`, etc.).
-- OpenRouter provider: chat completions, tool calling, model listing, streaming
-  flag, and optional `HTTP-Referer` / `X-Title` attribution headers.
+- OpenRouter provider: chat completions, tool calling, model listing, and
+  optional `HTTP-Referer` / `X-Title` attribution headers.
 - `opencode` module and `Config::load_opencode_auth` / `load_opencode_auth_from`
   for reusing API keys from the opencode CLI's `auth.json`. Opt-in; existing
   keys are never overwritten.
 - devenv.nix + cargo-zigbuild static build support per RFC_RUST_DEVENV_ZIG_STATIC_BUILDS.
+
+### Notes
+
+- `Provider::supports_streaming` reports what a provider actually implements,
+  not what its upstream API offers. No backend implements streaming yet, so
+  `Client::can_stream` returns `false` for every provider.

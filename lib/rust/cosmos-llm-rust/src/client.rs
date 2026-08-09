@@ -126,14 +126,17 @@ impl Client {
         Ok(self)
     }
 
-    /// Returns `true` if the current provider supports streaming.
+    /// Returns `true` if the current provider implements streaming.
+    ///
+    /// No provider implements streaming yet, so this is currently always
+    /// `false`. See [`Provider::supports_streaming`].
     ///
     /// # Examples
     ///
     /// ```no_run
     /// use cosmos_llm::Client;
     /// let client = Client::new("openai", "sk-test").unwrap();
-    /// assert!(client.can_stream());
+    /// assert!(!client.can_stream());
     /// ```
     pub fn can_stream(&self) -> bool {
         self.provider.supports_streaming()
@@ -283,7 +286,7 @@ mod tests {
     #[test]
     fn can_stream_openai() {
         let client = Client::new("openai", "key").unwrap();
-        assert!(client.can_stream());
+        assert!(!client.can_stream());
     }
 
     #[tokio::test]

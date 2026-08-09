@@ -31,11 +31,14 @@
 //!
 //! ## Supported providers
 //!
-//! | Name | Completion | Streaming | Models |
-//! |---|---|---|---|
-//! | `openai` | ✓ | ✓ | ✓ |
-//! | `anthropic` | ✓ | — | ✓ (static list) |
-//! | `openrouter` | ✓ | ✓ | ✓ |
+//! | Name | Completion | Tools | Streaming | Models |
+//! |---|---|---|---|---|
+//! | `openai` | ✓ | ✓ | — | ✓ |
+//! | `anthropic` | ✓ | ✓ | — | ✓ (static list) |
+//! | `openrouter` | ✓ | ✓ | — | ✓ |
+//!
+//! Streaming is not implemented for any provider yet;
+//! [`Client::can_stream`] reports `false` everywhere.
 //!
 //! ## Reusing opencode credentials
 //!

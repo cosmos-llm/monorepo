@@ -4,11 +4,15 @@ A unified Rust client for multiple LLM providers. Part of the [Cosmos-LLM](https
 
 ## Supported providers
 
-| Name | Completion | Streaming | Models |
-|---|---|---|---|
-| `openai` | ✓ | ✓ | ✓ |
-| `anthropic` | ✓ | — | ✓ (static list) |
-| `openrouter` | ✓ | ✓ | ✓ |
+| Name | Completion | Tools | Streaming | Models |
+|---|---|---|---|---|
+| `openai` | ✓ | ✓ | — | ✓ |
+| `anthropic` | ✓ | ✓ | — | ✓ (static list) |
+| `openrouter` | ✓ | ✓ | — | ✓ |
+
+Streaming is not implemented yet. `Client::can_stream()` reports `false` for
+every provider, and will start reporting `true` per-provider as streaming
+lands.
 
 ## Installation
 
