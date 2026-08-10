@@ -44,8 +44,7 @@ pub fn glob_tool(filesystem: Arc<Filesystem>) -> ToolDefinition {
                 .ok_or("pattern must be a string")?
                 .to_string();
 
-            let re = glob_to_regex(&pattern)
-                .map_err(|e| format!("invalid glob pattern: {e}"))?;
+            let re = glob_to_regex(&pattern).map_err(|e| format!("invalid glob pattern: {e}"))?;
             let match_basename = !pattern.contains('/');
 
             let all = filesystem.all_files("");
@@ -97,8 +96,7 @@ fn glob_to_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
                         group.push('|');
                         first = false;
                     } else {
-                        if !first {
-                        }
+                        if !first {}
                         group.push(gc);
                     }
                 }
@@ -127,7 +125,8 @@ mod tests {
                 s.file("lib.rs", Some(""), Default::default()).unwrap();
                 s.file("main.rs", Some(""), Default::default()).unwrap();
             });
-            root.file("Cargo.toml", Some(""), Default::default()).unwrap();
+            root.file("Cargo.toml", Some(""), Default::default())
+                .unwrap();
         }))
     }
 

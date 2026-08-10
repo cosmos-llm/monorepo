@@ -41,8 +41,7 @@ pub fn list_tool(filesystem: Arc<Filesystem>) -> ToolDefinition {
             let all = filesystem.all_files("");
 
             let filtered: Vec<_> = if let Some(ref pat) = pattern {
-                let re = build_glob_regex(pat)
-                    .map_err(|e| format!("invalid glob pattern: {e}"))?;
+                let re = build_glob_regex(pat).map_err(|e| format!("invalid glob pattern: {e}"))?;
                 let match_basename = !pat.contains('/');
                 all.into_iter()
                     .filter(|e| {

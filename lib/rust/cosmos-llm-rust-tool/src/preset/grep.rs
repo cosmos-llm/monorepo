@@ -29,9 +29,7 @@ use crate::{ParameterType, ToolDefinition};
 /// ```
 pub fn grep_tool(filesystem: Arc<Filesystem>) -> ToolDefinition {
     ToolDefinition::new("grep")
-        .description(
-            "Search for regex patterns in files within the virtual filesystem",
-        )
+        .description("Search for regex patterns in files within the virtual filesystem")
         .param(
             "pattern",
             ParameterType::String,
@@ -51,14 +49,14 @@ pub fn grep_tool(filesystem: Arc<Filesystem>) -> ToolDefinition {
                 .to_string();
             let file_pattern = params["file_pattern"].as_str().map(|s| s.to_string());
 
-            let regex = Regex::new(&search_pattern)
-                .map_err(|e| format!("invalid regex pattern: {e}"))?;
+            let regex =
+                Regex::new(&search_pattern).map_err(|e| format!("invalid regex pattern: {e}"))?;
 
             let all = filesystem.all_files("");
 
             let files_to_search: Vec<_> = if let Some(ref fpat) = file_pattern {
-                let freg = file_glob_regex(fpat)
-                    .map_err(|e| format!("invalid file pattern: {e}"))?;
+                let freg =
+                    file_glob_regex(fpat).map_err(|e| format!("invalid file pattern: {e}"))?;
                 let match_basename = !fpat.contains('/');
                 all.into_iter()
                     .filter(|e| {
