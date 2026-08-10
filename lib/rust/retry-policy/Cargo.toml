@@ -1,0 +1,30 @@
+[package]
+name = "retry-policy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Retry schedules with exponential backoff, jitter, and attempt records"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/retry-policy"
+readme = "README.md"
+keywords = ["retry", "backoff", "jitter", "resilience"]
+categories = ["asynchronous", "network-programming"]
+
+[features]
+default = ["tokio"]
+# `RetryPolicy::run`, which sleeps between attempts on a real clock. Without it
+# the crate still computes schedules and drives them through an injected clock,
+# which is all the tests need and all a caller with its own runtime needs.
+tokio = ["dep:tokio"]
+
+[dependencies]
+tokio = { version = "1", features = ["time"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time", "test-util"] }
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
