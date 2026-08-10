@@ -92,6 +92,34 @@ impl Client {
         })
     }
 
+    /// Wraps an already-constructed [`Provider`] in a [`Client`].
+    ///
+    /// This is the entry point for a provider that [`resolve`] cannot name: a
+    /// [`MockProvider`](crate::providers::mock::MockProvider) in a test, or an
+    /// implementation living outside this crate. Infallible, since there is no
+    /// name to look up and no key to read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # #[cfg(feature = "mock")] {
+    /// use cosmos_llm::providers::mock::MockProvider;
+    /// use cosmos_llm::Client;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let client = Client::from_provider(Box::new(MockProvider::new().respond("hi")))
+    ///     .with_model("mock-model");
+    /// assert_eq!(client.complete("anything").await.unwrap(), "hi");
+    /// # })
+    /// # }
+    /// ```
+    pub fn from_provider(provider: Box<dyn Provider>) -> Self {
+        Self {
+            provider,
+            default_model: None,
+        }
+    }
+
     /// Creates a [`Client`] pointed at a non-default API root.
     ///
     /// Use this to talk to an OpenAI-compatible server (Azure OpenAI, a local
@@ -241,18 +269,23 @@ impl Client {
     /// # })
     /// ```
     pub async fn complete(&self, prompt: impl Into<String>) -> Result<String, CosmosError> {
-        let model = self.default_model.as_deref().ok_or_else(|| {
-            CosmosError::Configuration(
-                "no default model set; call .with_model() or set it in Config".to_owned(),
-            )
-        })?;
+        let model = self
+            .default_model
+            .as_deref()
+            .ok_or_else(|| CosmosError::Configuration {
+                provider: self.provider.name().to_owned(),
+                message: "no default model set; call .with_model() or set it in Config".to_owned(),
+            })?;
 
         let req = CompletionRequest::new(model, vec![Message::user(prompt)]);
         let resp = self.provider.completion(&req).await?;
 
         resp.content()
             .map(str::to_owned)
-            .ok_or_else(|| CosmosError::InvalidResponse("provider returned no content".into()))
+            .ok_or_else(|| CosmosError::InvalidResponse {
+                provider: self.provider.name().to_owned(),
+                message: "provider returned no content".to_owned(),
+            })
     }
 
     /// Sends a full [`CompletionRequest`] and returns the provider response.
@@ -282,12 +315,7 @@ impl Client {
         &self,
         mut req: CompletionRequest,
     ) -> Result<CompletionResponse, CosmosError> {
-        if req.model.is_empty() {
-            req.model = self
-                .default_model
-                .clone()
-                .ok_or_else(|| CosmosError::Configuration("no model specified".into()))?;
-        }
+        self.fill_default_model(&mut req)?;
         self.provider.completion(&req).await
     }
 
@@ -349,12 +377,7 @@ impl Client {
         &self,
         mut req: CompletionRequest,
     ) -> Result<CompletionStream, CosmosError> {
-        if req.model.is_empty() {
-            req.model = self
-                .default_model
-                .clone()
-                .ok_or_else(|| CosmosError::Configuration("no model specified".into()))?;
-        }
+        self.fill_default_model(&mut req)?;
         self.provider.stream_completion(&req).await
     }
 
@@ -384,14 +407,35 @@ impl Client {
     /// # })
     /// ```
     pub async fn stream(&self, prompt: impl Into<String>) -> Result<CompletionStream, CosmosError> {
-        let model = self.default_model.as_deref().ok_or_else(|| {
-            CosmosError::Configuration(
-                "no default model set; call .with_model() or set it in Config".to_owned(),
-            )
-        })?;
+        let model = self
+            .default_model
+            .as_deref()
+            .ok_or_else(|| CosmosError::Configuration {
+                provider: self.provider.name().to_owned(),
+                message: "no default model set; call .with_model() or set it in Config".to_owned(),
+            })?;
 
         self.stream_completion(CompletionRequest::new(model, vec![Message::user(prompt)]))
             .await
+    }
+
+    /// Substitutes the client's default model when the request names none.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::Configuration`] when the request has no model and
+    /// the client has no default to supply.
+    fn fill_default_model(&self, req: &mut CompletionRequest) -> Result<(), CosmosError> {
+        if req.model.is_empty() {
+            req.model = self
+                .default_model
+                .clone()
+                .ok_or_else(|| CosmosError::Configuration {
+                    provider: self.provider.name().to_owned(),
+                    message: "no model specified".to_owned(),
+                })?;
+        }
+        Ok(())
     }
 
     /// Streams a completion, invoking `on_chunk` per chunk, and returns the
@@ -477,7 +521,10 @@ mod tests {
     #[test]
     fn unknown_provider_returns_error() {
         let result = Client::new("unknown-provider", "key");
-        assert!(matches!(result, Err(CosmosError::UnsupportedProvider(_))));
+        assert!(matches!(
+            result,
+            Err(CosmosError::UnsupportedProvider { .. })
+        ));
     }
 
     #[test]
@@ -497,7 +544,7 @@ mod tests {
     async fn complete_without_model_returns_config_error() {
         let client = Client::new("openai", "key").unwrap();
         let err = client.complete("hello").await.unwrap_err();
-        assert!(matches!(err, CosmosError::Configuration(_)));
+        assert!(matches!(err, CosmosError::Configuration { .. }));
     }
 
     // A `CompletionStream` is not `Debug`, so these assert on the error arm
@@ -508,7 +555,7 @@ mod tests {
         let client = Client::new("openai", "key").unwrap();
         assert!(matches!(
             client.stream("hello").await,
-            Err(CosmosError::Configuration(_))
+            Err(CosmosError::Configuration { .. })
         ));
     }
 
@@ -518,7 +565,7 @@ mod tests {
         let req = CompletionRequest::new("", vec![Message::user("hi")]);
         assert!(matches!(
             client.stream_completion(req).await,
-            Err(CosmosError::Configuration(_))
+            Err(CosmosError::Configuration { .. })
         ));
     }
 }

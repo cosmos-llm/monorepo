@@ -1,11 +1,15 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
 use crate::error::CosmosError;
-use crate::providers::{stream_from_response, CompletionStream, Provider};
+use crate::providers::{
+    map_anthropic_error, retry_after_from_headers, stream_from_response, transport_error,
+    CompletionStream, Provider,
+};
 use crate::types::{
     Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, ToolCall, ToolCallDelta,
     Usage,
@@ -17,6 +21,9 @@ use crate::types::{
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+
+/// Name this provider reports from [`Provider::name`] and attaches to errors.
+const PROVIDER_NAME: &str = "anthropic";
 
 /// Static list of known Claude models, returned by [`AnthropicProvider::models`].
 ///
@@ -125,12 +132,14 @@ impl AnthropicProvider {
     }
 
     fn resolved_key(&self) -> Result<&str, CosmosError> {
-        self.api_key.as_deref().ok_or_else(|| {
-            CosmosError::Authentication(
-                "Anthropic API key not set. Export ANTHROPIC_API_KEY or CLLM__ANTHROPIC__API_KEY."
+        self.api_key
+            .as_deref()
+            .ok_or_else(|| CosmosError::Authentication {
+                provider: PROVIDER_NAME.to_owned(),
+                message: "Anthropic API key not set. Export ANTHROPIC_API_KEY or \
+                          CLLM__ANTHROPIC__API_KEY."
                     .to_owned(),
-            )
-        })
+            })
     }
 
     /// Splits messages into an optional system string and the remaining chat messages.
@@ -149,17 +158,97 @@ impl AnthropicProvider {
         (system, chat)
     }
 
+    /// Translates messages into Anthropic's content-block format.
+    ///
+    /// Anthropic differs from OpenAI in two ways that matter here:
+    ///
+    /// * A tool result is a `tool_result` **content block** inside a `user`
+    ///   message, keyed by `tool_use_id` — there is no `"tool"` role.
+    /// * Parallel results must share one user message. Anthropic rejects two
+    ///   consecutive `user` messages, so a turn answering three calls sends one
+    ///   message holding three blocks. Consecutive tool results are therefore
+    ///   merged.
+    ///
+    /// An assistant turn that requested tools becomes a block array too: its
+    /// text, then one `tool_use` block per call, ids intact — the ids are what
+    /// the following `tool_result` blocks refer to.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::InvalidRequest`] for a tool-role message with no
+    /// `tool_call_id`, since the result cannot be attributed to a call.
+    pub(crate) fn messages_to_wire(messages: &[&Message]) -> Result<Vec<Value>, CosmosError> {
+        let mut wire: Vec<Value> = Vec::with_capacity(messages.len());
+
+        for msg in messages {
+            if msg.is_tool_result() {
+                let id =
+                    msg.tool_call_id
+                        .as_deref()
+                        .ok_or_else(|| CosmosError::InvalidRequest {
+                            provider: PROVIDER_NAME.to_owned(),
+                            message: "tool result message has no tool_call_id; Anthropic needs \
+                                  it as tool_use_id. Build it with Message::tool_result."
+                                .to_owned(),
+                            param: Some("messages[].content[].tool_use_id".to_owned()),
+                        })?;
+                let block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": id,
+                    "content": msg.content,
+                });
+
+                // Fold into the preceding user message when there is one, so
+                // parallel results arrive as one turn.
+                match wire.last_mut() {
+                    Some(prev) if prev["role"] == "user" && prev["content"].is_array() => {
+                        prev["content"]
+                            .as_array_mut()
+                            .expect("checked is_array")
+                            .push(block);
+                    }
+                    _ => wire.push(json!({ "role": "user", "content": [block] })),
+                }
+                continue;
+            }
+
+            if msg.tool_calls.is_empty() {
+                wire.push(json!({ "role": msg.role, "content": msg.content }));
+                continue;
+            }
+
+            let mut blocks: Vec<Value> = Vec::with_capacity(msg.tool_calls.len() + 1);
+            if !msg.content.is_empty() {
+                blocks.push(json!({ "type": "text", "text": msg.content }));
+            }
+            for call in &msg.tool_calls {
+                blocks.push(json!({
+                    "type": "tool_use",
+                    "id": call.id,
+                    "name": call.name,
+                    // Anthropic takes arguments as a native object, unlike
+                    // OpenAI's JSON string.
+                    "input": call.input,
+                }));
+            }
+            wire.push(json!({ "role": msg.role, "content": blocks }));
+        }
+
+        Ok(wire)
+    }
+
     /// Builds the JSON request body for the messages endpoint.
     ///
     /// Anthropic requires `max_tokens`, so a request that omits it gets a
     /// 1024-token default.
-    fn build_body(req: &CompletionRequest, stream: bool) -> Value {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
+    /// represented — see [`AnthropicProvider::messages_to_wire`].
+    fn build_body(req: &CompletionRequest, stream: bool) -> Result<Value, CosmosError> {
         let (system, chat_msgs) = Self::split_system(&req.messages);
-
-        let messages: Vec<Value> = chat_msgs
-            .iter()
-            .map(|m| json!({ "role": m.role, "content": m.content }))
-            .collect();
+        let messages = Self::messages_to_wire(&chat_msgs)?;
 
         let mut body = json!({
             "model": req.model,
@@ -189,7 +278,7 @@ impl AnthropicProvider {
             body["stream"] = json!(true);
         }
 
-        body
+        Ok(body)
     }
 
     fn map_response(body: Value) -> Result<CompletionResponse, CosmosError> {
@@ -250,18 +339,17 @@ impl AnthropicProvider {
         })
     }
 
-    fn handle_error(status: u16, body: &Value) -> CosmosError {
-        let msg = body["error"]["message"]
-            .as_str()
-            .unwrap_or("unknown error")
-            .to_owned();
-        match status {
-            401 => CosmosError::Authentication(msg),
-            429 => CosmosError::RateLimit(msg),
-            400 | 404 => CosmosError::InvalidRequest(msg),
-            s if s >= 500 => CosmosError::Server(msg),
-            _ => CosmosError::InvalidResponse(format!("unexpected status {status}: {msg}")),
-        }
+    /// Classifies an error response, honouring `Retry-After` when present.
+    ///
+    /// Delegates to [`map_anthropic_error`], which reads `error.type` — the
+    /// only place Anthropic distinguishes an overload from a bad request.
+    fn handle_error(status: u16, body: &Value, retry_after: Option<Duration>) -> CosmosError {
+        map_anthropic_error(status, body, retry_after)
+    }
+
+    /// Attributes a transport failure to this provider.
+    fn network_error(source: reqwest::Error) -> CosmosError {
+        transport_error(PROVIDER_NAME, source)
     }
 }
 
@@ -319,8 +407,10 @@ fn parse_anthropic_event(
     state: &mut StreamState,
     data: &str,
 ) -> Result<Option<StreamChunk>, CosmosError> {
-    let value: Value = serde_json::from_str(data)
-        .map_err(|e| CosmosError::Streaming(format!("malformed stream event: {e}")))?;
+    let value: Value = serde_json::from_str(data).map_err(|e| CosmosError::Streaming {
+        provider: PROVIDER_NAME.to_owned(),
+        message: format!("malformed stream event: {e}"),
+    })?;
 
     let block_index = value["index"].as_u64().unwrap_or(0);
 
@@ -394,10 +484,13 @@ fn parse_anthropic_event(
         }
 
         "error" => {
-            let msg = value["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown streaming error");
-            return Err(CosmosError::Streaming(msg.to_owned()));
+            // Anthropic reports overloads as a mid-stream `overloaded_error`,
+            // which is retryable. Classifying through the same mapper as a
+            // pre-stream error is what surfaces that; collapsing it to
+            // `Streaming` would make every mid-stream failure look permanent.
+            // No status arrives with the event, so 500 stands in for the
+            // server-side failure these events almost always describe.
+            return Err(map_anthropic_error(500, &value, None));
         }
 
         // "ping", "content_block_stop", "message_stop", and any future event
@@ -415,7 +508,7 @@ impl Provider for AnthropicProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionResponse, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, false);
+            let body = Self::build_body(req, false)?;
 
             let resp = self
                 .http
@@ -424,15 +517,17 @@ impl Provider for AnthropicProvider {
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .json(&body)
                 .send()
-                .await?;
+                .await
+                .map_err(Self::network_error)?;
 
             let status = resp.status().as_u16();
-            let json: Value = resp.json().await?;
+            let retry_after = retry_after_from_headers(resp.headers());
+            let json: Value = resp.json().await.map_err(Self::network_error)?;
 
             if (200..300).contains(&status) {
                 Self::map_response(json)
             } else {
-                Err(Self::handle_error(status, &json))
+                Err(Self::handle_error(status, &json, retry_after))
             }
         })
     }
@@ -443,7 +538,7 @@ impl Provider for AnthropicProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionStream, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, true);
+            let body = Self::build_body(req, true)?;
 
             let resp = self
                 .http
@@ -453,16 +548,18 @@ impl Provider for AnthropicProvider {
                 .header("accept", "text/event-stream")
                 .json(&body)
                 .send()
-                .await?;
+                .await
+                .map_err(Self::network_error)?;
 
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
+                let retry_after = retry_after_from_headers(resp.headers());
                 let json: Value = resp.json().await.unwrap_or(Value::Null);
-                return Err(Self::handle_error(status, &json));
+                return Err(Self::handle_error(status, &json, retry_after));
             }
 
             let mut state = StreamState::default();
-            Ok(stream_from_response(resp, move |data| {
+            Ok(stream_from_response(PROVIDER_NAME, resp, move |data| {
                 parse_anthropic_event(&mut state, data)
             }))
         })
@@ -470,6 +567,10 @@ impl Provider for AnthropicProvider {
 
     fn supports_streaming(&self) -> bool {
         true
+    }
+
+    fn name(&self) -> &str {
+        PROVIDER_NAME
     }
 
     fn models<'a>(
@@ -510,7 +611,7 @@ mod tests {
         let p = AnthropicProvider::new(None);
         assert!(matches!(
             p.resolved_key(),
-            Err(CosmosError::Authentication(_))
+            Err(CosmosError::Authentication { .. })
         ));
     }
 
@@ -567,11 +668,11 @@ mod tests {
     fn build_body_sets_stream_flag_and_defaults_max_tokens() {
         let req = CompletionRequest::new("claude-3-5-sonnet-20241022", vec![Message::user("hi")]);
 
-        let plain = AnthropicProvider::build_body(&req, false);
+        let plain = AnthropicProvider::build_body(&req, false).unwrap();
         assert!(plain.get("stream").is_none());
         assert_eq!(plain["max_tokens"], 1024);
 
-        let streamed = AnthropicProvider::build_body(&req, true);
+        let streamed = AnthropicProvider::build_body(&req, true).unwrap();
         assert_eq!(streamed["stream"], serde_json::json!(true));
     }
 
@@ -581,9 +682,171 @@ mod tests {
             "claude-3-5-sonnet-20241022",
             vec![Message::system("be brief"), Message::user("hi")],
         );
-        let body = AnthropicProvider::build_body(&req, false);
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
         assert_eq!(body["system"], "be brief");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn wire_plain_message_stays_a_string() {
+        // Anthropic accepts a plain string for content; keep it, since the
+        // block form is only needed when there is something to block up.
+        let wire = AnthropicProvider::messages_to_wire(&[&Message::user("hi")]).unwrap();
+        assert_eq!(wire[0], json!({"role": "user", "content": "hi"}));
+    }
+
+    #[test]
+    fn wire_tool_result_becomes_user_tool_result_block() {
+        let msg = Message::tool_result("toolu_1", "72F");
+        let wire = AnthropicProvider::messages_to_wire(&[&msg]).unwrap();
+        assert_eq!(
+            wire[0],
+            json!({
+                "role": "user",
+                "content": [{
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_1",
+                    "content": "72F",
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn wire_merges_parallel_tool_results_into_one_turn() {
+        // Anthropic rejects consecutive user messages, so three results must
+        // arrive as three blocks in one message.
+        let a = Message::tool_result("toolu_a", "first");
+        let b = Message::tool_result("toolu_b", "second");
+        let c = Message::tool_result("toolu_c", "third");
+        let wire = AnthropicProvider::messages_to_wire(&[&a, &b, &c]).unwrap();
+
+        assert_eq!(wire.len(), 1);
+        let blocks = wire[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0]["tool_use_id"], "toolu_a");
+        assert_eq!(blocks[2]["tool_use_id"], "toolu_c");
+    }
+
+    #[test]
+    fn wire_does_not_merge_results_into_a_plain_user_message() {
+        // The preceding user message carries a bare string, not blocks;
+        // appending to it would need it converted, and conflating a question
+        // with an unrelated tool result is the wrong shape anyway.
+        let user = Message::user("what is the weather");
+        let result = Message::tool_result("toolu_a", "72F");
+        let wire = AnthropicProvider::messages_to_wire(&[&user, &result]).unwrap();
+
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0]["content"], "what is the weather");
+        assert!(wire[1]["content"].is_array());
+    }
+
+    #[test]
+    fn wire_tool_result_without_id_fails_locally() {
+        let mut msg = Message::new("tool", "72F");
+        msg.tool_call_id = None;
+        let err = AnthropicProvider::messages_to_wire(&[&msg]).unwrap_err();
+        assert!(
+            matches!(err, CosmosError::InvalidRequest { message: ref m, .. } if m.contains("tool_call_id"))
+        );
+    }
+
+    #[test]
+    fn wire_assistant_emits_text_then_tool_use_blocks() {
+        let msg = Message::assistant_with_tools(
+            "Let me check.",
+            vec![ToolCall {
+                id: "toolu_1".into(),
+                name: "get_weather".into(),
+                input: json!({"city": "Boston"}),
+            }],
+        );
+        let wire = AnthropicProvider::messages_to_wire(&[&msg]).unwrap();
+        let blocks = wire[0]["content"].as_array().unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0], json!({"type": "text", "text": "Let me check."}));
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "tool_use",
+                "id": "toolu_1",
+                "name": "get_weather",
+                // A native object, not OpenAI's JSON string.
+                "input": {"city": "Boston"},
+            })
+        );
+    }
+
+    #[test]
+    fn wire_assistant_omits_empty_text_block() {
+        let msg = Message::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".into(),
+                name: "t".into(),
+                input: json!({}),
+            }],
+        );
+        let wire = AnthropicProvider::messages_to_wire(&[&msg]).unwrap();
+        let blocks = wire[0]["content"].as_array().unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
+    }
+
+    #[test]
+    fn parallel_tool_calls_round_trip_from_response_to_request() {
+        // Response → messages → request, checked against the shape a real
+        // Anthropic tool-use turn takes.
+        let body = json!({
+            "id": "msg_3",
+            "model": "claude-3-5-sonnet-20241022",
+            "content": [
+                {"type": "text", "text": "Checking both."},
+                {"type": "tool_use", "id": "toolu_a", "name": "search", "input": {"q": "rust"}},
+                {"type": "tool_use", "id": "toolu_b", "name": "fetch", "input": {"url": "http://x"}}
+            ],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 10, "output_tokens": 6}
+        });
+        let resp = AnthropicProvider::map_response(body).unwrap();
+        assert_eq!(resp.tool_calls().len(), 2);
+
+        let mut messages = vec![Message::user("find rust docs")];
+        messages.push(resp.to_assistant_message());
+        for call in resp.tool_calls() {
+            messages.push(Message::tool_result(
+                &call.id,
+                format!("result of {}", call.name),
+            ));
+        }
+
+        let req = CompletionRequest::new("claude-3-5-sonnet-20241022", messages);
+        let wire = AnthropicProvider::build_body(&req, false).unwrap();
+        let msgs = wire["messages"].as_array().unwrap();
+
+        // user, assistant(text + 2 tool_use), user(2 tool_result)
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[1]["role"], "assistant");
+        assert_eq!(msgs[1]["content"].as_array().unwrap().len(), 3);
+        assert_eq!(msgs[2]["role"], "user");
+
+        let results = msgs[2]["content"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Every tool_use_id refers to a tool_use block in the assistant turn.
+        let declared: Vec<&str> = msgs[1]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b["type"] == "tool_use")
+            .map(|b| b["id"].as_str().unwrap())
+            .collect();
+        for block in results {
+            assert_eq!(block["type"], "tool_result");
+            assert!(declared.contains(&block["tool_use_id"].as_str().unwrap()));
+        }
     }
 
     #[test]
@@ -706,16 +969,31 @@ mod tests {
 
     #[test]
     fn stream_surfaces_error_event() {
+        // An `overloaded_error` mid-stream is the single most common Anthropic
+        // streaming failure, and it is retryable. Reporting it as a generic
+        // streaming error would make a retry layer give up on it.
         let mut state = StreamState::default();
         let data = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
         let err = parse_anthropic_event(&mut state, data).unwrap_err();
-        assert!(matches!(err, CosmosError::Streaming(ref m) if m == "Overloaded"));
+        assert!(matches!(err, CosmosError::Server { message: ref m, .. } if m == "Overloaded"));
+        assert!(err.is_retryable());
+        assert_eq!(err.provider(), PROVIDER_NAME);
+    }
+
+    #[test]
+    fn stream_error_event_for_a_bad_request_is_not_retryable() {
+        let mut state = StreamState::default();
+        let data =
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"bad input"}}"#;
+        let err = parse_anthropic_event(&mut state, data).unwrap_err();
+        assert!(matches!(err, CosmosError::InvalidRequest { .. }));
+        assert!(!err.is_retryable());
     }
 
     #[test]
     fn stream_rejects_malformed_json() {
         let mut state = StreamState::default();
         let err = parse_anthropic_event(&mut state, "{oops").unwrap_err();
-        assert!(matches!(err, CosmosError::Streaming(_)));
+        assert!(matches!(err, CosmosError::Streaming { .. }));
     }
 }

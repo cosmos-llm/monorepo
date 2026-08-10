@@ -128,7 +128,7 @@ async fn openai_stream_rejects_error_status_before_streaming() {
 
     assert!(matches!(
         client.stream("hi").await,
-        Err(CosmosError::Authentication(_))
+        Err(CosmosError::Authentication { .. })
     ));
 
     mock.assert_async().await;
@@ -162,11 +162,15 @@ async fn openai_stream_surfaces_mid_stream_error() {
     let first = stream.next().await.unwrap().unwrap();
     assert_eq!(first.delta, "partial");
 
-    let second = stream.next().await.unwrap();
+    // A mid-stream failure is classified the same way a pre-stream one is, so
+    // a caller can tell a retryable overload from a permanent rejection. With
+    // no code in the payload, a server-side failure is the safe reading.
+    let err = stream.next().await.unwrap().unwrap_err();
     assert!(matches!(
-        second,
-        Err(CosmosError::Streaming(ref m)) if m.contains("upstream exploded")
+        err,
+        CosmosError::Server { ref message, .. } if message.contains("upstream exploded")
     ));
+    assert!(err.is_retryable());
 
     // The stream terminates after yielding its error.
     assert!(stream.next().await.is_none());
@@ -343,10 +347,17 @@ async fn anthropic_stream_surfaces_error_event() {
         .with_model("claude-3-5-sonnet-20241022");
 
     let mut stream = client.stream("hi").await.unwrap();
+    let err = stream.next().await.unwrap().unwrap_err();
+
+    // Anthropic's most common streaming failure. It has to come back retryable
+    // — that is the whole reason for classifying mid-stream errors rather than
+    // reporting them all as generic streaming failures.
     assert!(matches!(
-        stream.next().await.unwrap(),
-        Err(CosmosError::Streaming(ref m)) if m == "Overloaded"
+        err,
+        CosmosError::Server { ref message, .. } if message == "Overloaded"
     ));
+    assert!(err.is_retryable());
+    assert_eq!(err.provider(), "anthropic");
 }
 
 // ── OpenRouter ────────────────────────────────────────────────────────────────

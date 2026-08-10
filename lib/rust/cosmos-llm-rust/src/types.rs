@@ -2,12 +2,40 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A single message in a conversation.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Beyond `role` and `content`, a message can carry the bookkeeping a
+/// tool-calling loop needs: which call a result answers
+/// ([`Message::tool_result`]) and which calls an assistant turn requested
+/// ([`Message::assistant_with_tools`]). Providers disagree about how to encode
+/// that on the wire — OpenAI uses a `"tool"` role with a `tool_call_id`,
+/// Anthropic a `"user"` message holding a `tool_result` content block — so each
+/// provider translates these fields itself.
+///
+/// The tool fields are skipped when serializing if unset, so a plain
+/// text message produces exactly the same JSON it did before they existed.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Message {
-    /// Role of the message author: `"system"`, `"user"`, or `"assistant"`.
+    /// Role of the message author: `"system"`, `"user"`, `"assistant"`, or
+    /// `"tool"`.
     pub role: String,
     /// Text content of the message.
     pub content: String,
+    /// For `role == "tool"`: the identifier of the call this result answers.
+    ///
+    /// Required by every provider that supports parallel tool calls — without
+    /// it, the association between a result and its call is unrecoverable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
+    /// For `role == "assistant"`: the calls this message requested.
+    ///
+    /// A provider replaying an assistant turn needs these, not just the text;
+    /// see [`Message::assistant_with_tools`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCall>,
+    /// Optional tool name, which some providers attach to a function result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Message {
@@ -15,7 +43,7 @@ impl Message {
     ///
     /// # Arguments
     ///
-    /// * `role` — one of `"system"`, `"user"`, or `"assistant"`.
+    /// * `role` — one of `"system"`, `"user"`, `"assistant"`, or `"tool"`.
     /// * `content` — message text.
     ///
     /// # Examples
@@ -29,6 +57,9 @@ impl Message {
         Self {
             role: role.into(),
             content: content.into(),
+            tool_call_id: None,
+            tool_calls: Vec::new(),
+            name: None,
         }
     }
 
@@ -69,6 +100,126 @@ impl Message {
     /// ```
     pub fn assistant(content: impl Into<String>) -> Self {
         Self::new("assistant", content)
+    }
+
+    /// Creates a message carrying a tool's result back to the model.
+    ///
+    /// `call_id` must be the `id` of the [`ToolCall`] this answers. Each
+    /// provider maps this to its own wire shape: OpenAI to a `"tool"` role
+    /// message with `tool_call_id`, Anthropic to a `"user"` message holding a
+    /// `tool_result` block with `tool_use_id`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Message;
+    ///
+    /// let msg = Message::tool_result("call_1", "72°F and sunny");
+    /// assert_eq!(msg.role, "tool");
+    /// assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+    /// ```
+    pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: "tool".to_owned(),
+            content: content.into(),
+            tool_call_id: Some(call_id.into()),
+            tool_calls: Vec::new(),
+            name: None,
+        }
+    }
+
+    /// Creates a message carrying a tool's result serialized from JSON.
+    ///
+    /// Providers accept tool results as strings, so structured results have to
+    /// be stringified somewhere. Doing it here keeps the formatting consistent
+    /// instead of leaving each call site to pick a `to_string()` of its own.
+    /// A JSON string is passed through unquoted, since double-encoding it only
+    /// wastes tokens and confuses the model.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Message;
+    /// use serde_json::json;
+    ///
+    /// let msg = Message::tool_result_json("call_1", &json!({"temp_f": 72}));
+    /// assert_eq!(msg.content, r#"{"temp_f":72}"#);
+    ///
+    /// // A bare string is not re-quoted.
+    /// let plain = Message::tool_result_json("call_2", &json!("done"));
+    /// assert_eq!(plain.content, "done");
+    /// ```
+    pub fn tool_result_json(call_id: impl Into<String>, content: &Value) -> Self {
+        let text = match content {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        Self::tool_result(call_id, text)
+    }
+
+    /// Creates an assistant message that requested tool calls.
+    ///
+    /// Replaying an assistant turn requires the calls it made, not only its
+    /// text: OpenAI rejects a `"tool"` message whose `tool_call_id` refers to a
+    /// call absent from the preceding assistant message.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{Message, ToolCall};
+    /// use serde_json::json;
+    ///
+    /// let msg = Message::assistant_with_tools(
+    ///     "Let me check.",
+    ///     vec![ToolCall {
+    ///         id: "call_1".into(),
+    ///         name: "get_weather".into(),
+    ///         input: json!({"city": "Boston"}),
+    ///     }],
+    /// );
+    /// assert_eq!(msg.role, "assistant");
+    /// assert_eq!(msg.tool_calls.len(), 1);
+    /// ```
+    pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
+        Self {
+            role: "assistant".to_owned(),
+            content: content.into(),
+            tool_call_id: None,
+            tool_calls,
+            name: None,
+        }
+    }
+
+    /// Attaches a tool name to this message, returning `self`.
+    ///
+    /// Some providers accept a `name` alongside a function result. It is
+    /// optional everywhere this crate supports.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Message;
+    ///
+    /// let msg = Message::tool_result("call_1", "ok").with_name("get_weather");
+    /// assert_eq!(msg.name.as_deref(), Some("get_weather"));
+    /// ```
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Returns `true` if this message carries a tool result.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Message;
+    ///
+    /// assert!(Message::tool_result("call_1", "ok").is_tool_result());
+    /// assert!(!Message::user("hi").is_tool_result());
+    /// ```
+    pub fn is_tool_result(&self) -> bool {
+        self.role == "tool"
     }
 }
 
@@ -392,6 +543,44 @@ impl CompletionResponse {
             .map(|c| c.tool_calls.as_slice())
             .unwrap_or(&[])
     }
+
+    /// Builds the assistant message to replay this response in the next
+    /// request.
+    ///
+    /// A tool-calling loop appends this, then one [`Message::tool_result`] per
+    /// call. Both halves are required: providers correlate a result to its call
+    /// by id, and the id is only meaningful if the assistant turn that produced
+    /// it is present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{Choice, CompletionResponse, Message, ToolCall};
+    /// use serde_json::json;
+    ///
+    /// let resp = CompletionResponse {
+    ///     id: None,
+    ///     model: None,
+    ///     choices: vec![Choice {
+    ///         index: 0,
+    ///         message: Message::assistant("Checking."),
+    ///         finish_reason: Some("tool_calls".into()),
+    ///         tool_calls: vec![ToolCall {
+    ///             id: "call_1".into(),
+    ///             name: "get_weather".into(),
+    ///             input: json!({"city": "Boston"}),
+    ///         }],
+    ///     }],
+    ///     usage: None,
+    /// };
+    ///
+    /// let msg = resp.to_assistant_message();
+    /// assert_eq!(msg.content, "Checking.");
+    /// assert_eq!(msg.tool_calls[0].id, "call_1");
+    /// ```
+    pub fn to_assistant_message(&self) -> Message {
+        Message::assistant_with_tools(self.text(), self.tool_calls().to_vec())
+    }
 }
 
 /// A partial tool call delivered during a streaming response.
@@ -699,6 +888,87 @@ mod tests {
         assert_eq!(u.role, "user");
         let a = Message::assistant("asst");
         assert_eq!(a.role, "assistant");
+    }
+
+    #[test]
+    fn tool_result_carries_call_id() {
+        let msg = Message::tool_result("call_1", "72F");
+        assert_eq!(msg.role, "tool");
+        assert_eq!(msg.content, "72F");
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        assert!(msg.tool_calls.is_empty());
+        assert!(msg.is_tool_result());
+    }
+
+    #[test]
+    fn tool_result_json_stringifies_structured_content() {
+        let msg = Message::tool_result_json("c", &serde_json::json!({"a": 1}));
+        assert_eq!(msg.content, r#"{"a":1}"#);
+    }
+
+    #[test]
+    fn tool_result_json_passes_strings_through_unquoted() {
+        let msg = Message::tool_result_json("c", &serde_json::json!("plain"));
+        assert_eq!(msg.content, "plain");
+    }
+
+    #[test]
+    fn assistant_with_tools_keeps_calls() {
+        let msg = Message::assistant_with_tools(
+            "checking",
+            vec![ToolCall {
+                id: "call_1".into(),
+                name: "t".into(),
+                input: serde_json::json!({}),
+            }],
+        );
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert!(msg.tool_call_id.is_none());
+        assert!(!msg.is_tool_result());
+    }
+
+    #[test]
+    fn plain_message_serializes_without_tool_fields() {
+        // The tool fields are additive: a text-only message must produce
+        // exactly the JSON it did before they existed, or every provider body
+        // gains three null keys.
+        let json = serde_json::to_value(Message::user("hi")).unwrap();
+        assert_eq!(json, serde_json::json!({"role": "user", "content": "hi"}));
+    }
+
+    #[test]
+    fn tool_message_round_trips_through_serde() {
+        let msg = Message::tool_result("call_1", "ok").with_name("get_weather");
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["tool_call_id"], "call_1");
+        assert_eq!(json["name"], "get_weather");
+        assert_eq!(serde_json::from_value::<Message>(json).unwrap(), msg);
+    }
+
+    #[test]
+    fn response_converts_to_replayable_assistant_message() {
+        let resp = CompletionResponse {
+            id: None,
+            model: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant("checking"),
+                finish_reason: Some("tool_calls".into()),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".into(),
+                    name: "get_weather".into(),
+                    input: serde_json::json!({"city": "Boston"}),
+                }],
+            }],
+            usage: None,
+        };
+
+        let msg = resp.to_assistant_message();
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.content, "checking");
+        assert_eq!(msg.tool_calls.len(), 1);
+        assert_eq!(msg.tool_calls[0].id, "call_1");
     }
 
     #[test]

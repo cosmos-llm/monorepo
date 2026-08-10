@@ -11,6 +11,13 @@ readme = "README.md"
 keywords = ["llm", "ai", "openai", "anthropic", "nlp"]
 categories = ["api-bindings", "web-programming::http-client"]
 
+[features]
+default = ["mock"]
+# `MockProvider`, for testing consumer code without a network or an API key.
+# On by default: every consumer needs it for their own tests, and a separate
+# testing crate that depended on this one would be a dependency cycle.
+mock = ["tokio/time"]
+
 [dependencies]
 thiserror = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }

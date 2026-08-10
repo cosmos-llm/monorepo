@@ -1,18 +1,25 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::time::Duration;
 
 use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
 use crate::error::CosmosError;
 use crate::providers::openai::parse_openai_chunk;
-use crate::providers::{stream_from_response, CompletionStream, Provider};
+use crate::providers::{
+    map_openai_error, retry_after_from_headers, stream_from_response, transport_error,
+    CompletionStream, Provider,
+};
 use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
 /// Default API root, used unless overridden by
 /// [`OpenRouterProvider::with_base_url`] or the `OPENROUTER_BASE_URL`
 /// environment variable.
 pub const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+
+/// Name this provider reports from [`Provider::name`] and attaches to errors.
+const PROVIDER_NAME: &str = "openrouter";
 
 /// Provider implementation for the OpenRouter API.
 ///
@@ -154,13 +161,14 @@ impl OpenRouterProvider {
     }
 
     fn resolved_key(&self) -> Result<&str, CosmosError> {
-        self.api_key.as_deref().ok_or_else(|| {
-            CosmosError::Authentication(
-                "OpenRouter API key not set. Export OPENROUTER_API_KEY or \
-                 CLLM__OPENROUTER__API_KEY."
+        self.api_key
+            .as_deref()
+            .ok_or_else(|| CosmosError::Authentication {
+                provider: PROVIDER_NAME.to_owned(),
+                message: "OpenRouter API key not set. Export OPENROUTER_API_KEY or \
+                          CLLM__OPENROUTER__API_KEY."
                     .to_owned(),
-            )
-        })
+            })
     }
 
     /// Applies the bearer token and optional attribution headers to a request.
@@ -178,11 +186,24 @@ impl OpenRouterProvider {
     /// Builds the JSON request body for the chat completions endpoint.
     ///
     /// Mirrors OpenAI's schema, including the `stream_options.include_usage`
-    /// flag that makes the final streamed chunk carry token counts.
-    fn build_body(req: &CompletionRequest, stream: bool) -> Value {
+    /// flag that makes the final streamed chunk carry token counts. Message
+    /// translation — tool results and replayed tool calls — is shared with the
+    /// OpenAI provider, since the wire format is identical.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
+    /// represented, e.g. a tool result with no `tool_call_id`.
+    fn build_body(req: &CompletionRequest, stream: bool) -> Result<Value, CosmosError> {
+        let messages = req
+            .messages
+            .iter()
+            .map(crate::providers::openai::OpenAiProvider::message_to_wire)
+            .collect::<Result<Vec<_>, _>>()?;
+
         let mut body = json!({
             "model": req.model,
-            "messages": req.messages,
+            "messages": messages,
         });
 
         if let Some(t) = req.temperature {
@@ -208,7 +229,7 @@ impl OpenRouterProvider {
             body["stream_options"] = json!({ "include_usage": true });
         }
 
-        body
+        Ok(body)
     }
 
     fn map_response(body: Value) -> Result<CompletionResponse, CosmosError> {
@@ -217,7 +238,10 @@ impl OpenRouterProvider {
 
         let choices = body["choices"]
             .as_array()
-            .ok_or_else(|| CosmosError::InvalidResponse("missing 'choices' field".into()))?
+            .ok_or_else(|| CosmosError::InvalidResponse {
+                provider: PROVIDER_NAME.to_owned(),
+                message: "missing 'choices' field".to_owned(),
+            })?
             .iter()
             .map(|c| {
                 let role = c["message"]["role"]
@@ -248,7 +272,7 @@ impl OpenRouterProvider {
                     .unwrap_or_default();
                 Choice {
                     index,
-                    message: Message { role, content },
+                    message: Message::new(role, content),
                     finish_reason,
                     tool_calls,
                 }
@@ -276,22 +300,16 @@ impl OpenRouterProvider {
     /// Maps an error response to a [`CosmosError`].
     ///
     /// OpenRouter reports upstream provider failures with its own status code
-    /// and an `error.message` body, matching OpenAI's error envelope. A 402 is
-    /// returned when the account is out of credits.
-    fn handle_error(status: u16, body: &Value) -> CosmosError {
-        let msg = body["error"]["message"]
-            .as_str()
-            .unwrap_or("unknown error")
-            .to_owned();
-        match status {
-            401 | 403 => CosmosError::Authentication(msg),
-            402 => CosmosError::InsufficientQuota(msg),
-            404 => CosmosError::NotFound(msg),
-            429 => CosmosError::RateLimit(msg),
-            400 | 422 => CosmosError::InvalidRequest(msg),
-            s if s >= 500 => CosmosError::Server(msg),
-            _ => CosmosError::InvalidResponse(format!("unexpected status {status}: {msg}")),
-        }
+    /// and an `error.message` body, matching OpenAI's error envelope, so the
+    /// shared [`map_openai_error`] handles it — including the 402 it returns
+    /// when the account is out of credits.
+    fn handle_error(status: u16, body: &Value, retry_after: Option<Duration>) -> CosmosError {
+        map_openai_error(PROVIDER_NAME, status, body, retry_after)
+    }
+
+    /// Attributes a transport failure to this provider.
+    fn network_error(source: reqwest::Error) -> CosmosError {
+        transport_error(PROVIDER_NAME, source)
     }
 }
 
@@ -302,22 +320,27 @@ impl Provider for OpenRouterProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionResponse, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, false);
+            let body = Self::build_body(req, false)?;
 
             let request = self.authorize(
                 self.http
                     .post(format!("{}/chat/completions", self.base_url)),
                 key,
             );
-            let resp = request.json(&body).send().await?;
+            let resp = request
+                .json(&body)
+                .send()
+                .await
+                .map_err(Self::network_error)?;
 
             let status = resp.status().as_u16();
-            let json: Value = resp.json().await?;
+            let retry_after = retry_after_from_headers(resp.headers());
+            let json: Value = resp.json().await.map_err(Self::network_error)?;
 
             if (200..300).contains(&status) {
                 Self::map_response(json)
             } else {
-                Err(Self::handle_error(status, &json))
+                Err(Self::handle_error(status, &json, retry_after))
             }
         })
     }
@@ -328,7 +351,7 @@ impl Provider for OpenRouterProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionStream, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, true);
+            let body = Self::build_body(req, true)?;
 
             let request = self
                 .authorize(
@@ -337,20 +360,31 @@ impl Provider for OpenRouterProvider {
                     key,
                 )
                 .header("accept", "text/event-stream");
-            let resp = request.json(&body).send().await?;
+            let resp = request
+                .json(&body)
+                .send()
+                .await
+                .map_err(Self::network_error)?;
 
             let status = resp.status().as_u16();
             if !(200..300).contains(&status) {
+                let retry_after = retry_after_from_headers(resp.headers());
                 let json: Value = resp.json().await.unwrap_or(Value::Null);
-                return Err(Self::handle_error(status, &json));
+                return Err(Self::handle_error(status, &json, retry_after));
             }
 
-            Ok(stream_from_response(resp, parse_openai_chunk))
+            Ok(stream_from_response(PROVIDER_NAME, resp, |data| {
+                parse_openai_chunk(PROVIDER_NAME, data)
+            }))
         })
     }
 
     fn supports_streaming(&self) -> bool {
         true
+    }
+
+    fn name(&self) -> &str {
+        PROVIDER_NAME
     }
 
     fn models<'a>(
@@ -364,10 +398,11 @@ impl Provider for OpenRouterProvider {
                 request = self.authorize(request, key);
             }
 
-            let resp = request.send().await?;
+            let resp = request.send().await.map_err(Self::network_error)?;
 
             let status = resp.status().as_u16();
-            let json: Value = resp.json().await?;
+            let retry_after = retry_after_from_headers(resp.headers());
+            let json: Value = resp.json().await.map_err(Self::network_error)?;
 
             if (200..300).contains(&status) {
                 let ids = json["data"]
@@ -378,7 +413,7 @@ impl Provider for OpenRouterProvider {
                     .collect();
                 Ok(ids)
             } else {
-                Err(Self::handle_error(status, &json))
+                Err(Self::handle_error(status, &json, retry_after))
             }
         })
     }
@@ -409,18 +444,47 @@ mod tests {
     fn build_body_sets_stream_flags_only_when_streaming() {
         let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
 
-        let plain = OpenRouterProvider::build_body(&req, false);
+        let plain = OpenRouterProvider::build_body(&req, false).unwrap();
         assert!(plain.get("stream").is_none());
 
-        let streamed = OpenRouterProvider::build_body(&req, true);
+        let streamed = OpenRouterProvider::build_body(&req, true).unwrap();
         assert_eq!(streamed["stream"], serde_json::json!(true));
         assert_eq!(streamed["stream_options"]["include_usage"], true);
     }
 
     #[test]
+    fn build_body_translates_tool_messages_like_openai() {
+        use crate::types::ToolCall;
+
+        let req = CompletionRequest::new(
+            "openai/gpt-4o",
+            vec![
+                Message::user("q"),
+                Message::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "call_1".into(),
+                        name: "search".into(),
+                        input: serde_json::json!({"q": "rust"}),
+                    }],
+                ),
+                Message::tool_result("call_1", "found"),
+            ],
+        );
+        let body = OpenRouterProvider::build_body(&req, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs[1]["tool_calls"][0]["id"], "call_1");
+        // OpenAI's JSON-string encoding of arguments, not a native object.
+        assert!(msgs[1]["tool_calls"][0]["function"]["arguments"].is_string());
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "call_1");
+    }
+
+    #[test]
     fn missing_key_yields_auth_error() {
         let err = provider(None).resolved_key().unwrap_err();
-        assert!(matches!(err, CosmosError::Authentication(_)));
+        assert!(matches!(err, CosmosError::Authentication { .. }));
         assert!(err.to_string().contains("OPENROUTER_API_KEY"));
     }
 
@@ -489,35 +553,53 @@ mod tests {
     #[test]
     fn map_response_missing_choices_is_invalid() {
         let err = OpenRouterProvider::map_response(serde_json::json!({"id": "x"})).unwrap_err();
-        assert!(matches!(err, CosmosError::InvalidResponse(_)));
+        assert!(matches!(err, CosmosError::InvalidResponse { .. }));
     }
 
     #[test]
     fn handle_error_maps_status_codes() {
         let body = serde_json::json!({"error": {"message": "nope"}});
         assert!(matches!(
-            OpenRouterProvider::handle_error(401, &body),
-            CosmosError::Authentication(_)
+            OpenRouterProvider::handle_error(401, &body, None),
+            CosmosError::Authentication { .. }
+        ));
+        // OpenRouter's out-of-credits status.
+        assert!(matches!(
+            OpenRouterProvider::handle_error(402, &body, None),
+            CosmosError::InsufficientQuota { .. }
         ));
         assert!(matches!(
-            OpenRouterProvider::handle_error(402, &body),
-            CosmosError::InsufficientQuota(_)
+            OpenRouterProvider::handle_error(404, &body, None),
+            CosmosError::ResourceNotFound { .. }
         ));
         assert!(matches!(
-            OpenRouterProvider::handle_error(404, &body),
-            CosmosError::NotFound(_)
+            OpenRouterProvider::handle_error(429, &body, None),
+            CosmosError::RateLimit { .. }
         ));
         assert!(matches!(
-            OpenRouterProvider::handle_error(429, &body),
-            CosmosError::RateLimit(_)
+            OpenRouterProvider::handle_error(400, &body, None),
+            CosmosError::InvalidRequest { .. }
         ));
         assert!(matches!(
-            OpenRouterProvider::handle_error(400, &body),
-            CosmosError::InvalidRequest(_)
+            OpenRouterProvider::handle_error(503, &body, None),
+            CosmosError::Server { .. }
         ));
-        assert!(matches!(
-            OpenRouterProvider::handle_error(503, &body),
-            CosmosError::Server(_)
-        ));
+    }
+
+    #[test]
+    fn errors_are_attributed_to_openrouter_not_openai() {
+        // The error mapper is shared with OpenAI; a misattributed provider name
+        // would send a caller debugging the wrong service.
+        let body = serde_json::json!({"error": {"message": "nope"}});
+        let err = OpenRouterProvider::handle_error(429, &body, None);
+        assert_eq!(err.provider(), "openrouter");
+    }
+
+    #[test]
+    fn handle_error_honors_retry_after() {
+        let body = serde_json::json!({"error": {"message": "slow down"}});
+        let err = OpenRouterProvider::handle_error(429, &body, Some(Duration::from_secs(7)));
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
+        assert!(err.is_retryable());
     }
 }

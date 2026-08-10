@@ -160,7 +160,7 @@ pub fn parse_keys(contents: &str) -> Result<HashMap<String, String>, CosmosError
 pub fn load_keys_from(path: impl AsRef<Path>) -> Result<HashMap<String, String>, CosmosError> {
     let path = path.as_ref();
     let contents = std::fs::read_to_string(path)
-        .map_err(|e| CosmosError::Configuration(format!("cannot read {}: {e}", path.display())))?;
+        .map_err(|e| CosmosError::config(format!("cannot read {}: {e}", path.display())))?;
     parse_keys(&contents)
 }
 
@@ -187,8 +187,8 @@ pub fn load_keys_from(path: impl AsRef<Path>) -> Result<HashMap<String, String>,
 /// ```
 pub fn load_keys() -> Result<HashMap<String, String>, CosmosError> {
     let path = auth_path().ok_or_else(|| {
-        CosmosError::Configuration(
-            "cannot locate opencode auth.json: neither XDG_DATA_HOME nor HOME is set".to_owned(),
+        CosmosError::config(
+            "cannot locate opencode auth.json: neither XDG_DATA_HOME nor HOME is set",
         )
     })?;
     if !path.exists() {
@@ -274,7 +274,7 @@ mod tests {
     #[test]
     fn load_keys_from_missing_file_is_configuration_error() {
         let err = load_keys_from("/nonexistent/opencode/auth.json").unwrap_err();
-        assert!(matches!(err, CosmosError::Configuration(_)));
+        assert!(matches!(err, CosmosError::Configuration { .. }));
     }
 
     #[test]

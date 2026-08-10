@@ -34,7 +34,10 @@ fn client_from_config_anthropic() {
 #[test]
 fn client_unsupported_provider() {
     let result = Client::new("llama-local", "key");
-    assert!(matches!(result, Err(CosmosError::UnsupportedProvider(_))));
+    assert!(matches!(
+        result,
+        Err(CosmosError::UnsupportedProvider { .. })
+    ));
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -64,14 +67,42 @@ fn completion_request_builder_chain() {
 
 #[test]
 fn error_display() {
-    let e = CosmosError::Authentication("bad key".into());
+    let e = CosmosError::Authentication {
+        provider: "openai".into(),
+        message: "bad key".into(),
+    };
     assert!(e.to_string().contains("bad key"));
+    assert!(e.to_string().contains("openai"));
 
-    let e = CosmosError::RateLimit("slow down".into());
+    let e = CosmosError::RateLimit {
+        provider: "openai".into(),
+        message: "slow down".into(),
+        retry_after: None,
+    };
     assert!(e.to_string().contains("slow down"));
 
-    let e = CosmosError::UnsupportedProvider("groq".into());
+    let e = CosmosError::UnsupportedProvider {
+        name: "groq".into(),
+    };
     assert!(e.to_string().contains("groq"));
+}
+
+#[test]
+fn error_classification_survives_the_public_api() {
+    // The property a retry layer depends on, asserted from outside the crate.
+    let retryable = CosmosError::Server {
+        provider: "openai".into(),
+        status: 503,
+        message: "overloaded".into(),
+    };
+    assert!(retryable.is_retryable());
+
+    let permanent = CosmosError::InsufficientQuota {
+        provider: "openai".into(),
+        message: "add credits".into(),
+    };
+    assert!(!permanent.is_retryable());
+    assert_eq!(permanent.provider(), "openai");
 }
 
 // ── Provider resolution ───────────────────────────────────────────────────────
@@ -104,7 +135,7 @@ fn resolve_is_case_insensitive() {
 #[test]
 fn resolve_unknown() {
     let p = cosmos_llm::providers::resolve("grok", None);
-    assert!(matches!(p, Err(CosmosError::UnsupportedProvider(_))));
+    assert!(matches!(p, Err(CosmosError::UnsupportedProvider { .. })));
 }
 
 // ── opencode auth interop ─────────────────────────────────────────────────────
@@ -165,7 +196,7 @@ fn opencode_auth_missing_explicit_path_errors() {
     let err = config
         .load_opencode_auth_from("/nonexistent/opencode/auth.json")
         .unwrap_err();
-    assert!(matches!(err, CosmosError::Configuration(_)));
+    assert!(matches!(err, CosmosError::Configuration { .. }));
 }
 
 #[test]
@@ -185,7 +216,7 @@ fn opencode_auth_invalid_json_errors() {
 async fn complete_without_model_returns_config_error() {
     let client = Client::new("openai", "sk-test").unwrap();
     let err = client.complete("hello").await.unwrap_err();
-    assert!(matches!(err, CosmosError::Configuration(_)));
+    assert!(matches!(err, CosmosError::Configuration { .. }));
 }
 
 // ── Async: Anthropic model list ───────────────────────────────────────────────
@@ -216,7 +247,7 @@ async fn stream_without_model_returns_config_error() {
     let client = Client::new("openai", "sk-test").unwrap();
     assert!(matches!(
         client.stream("hello").await,
-        Err(CosmosError::Configuration(_))
+        Err(CosmosError::Configuration { .. })
     ));
 }
 
