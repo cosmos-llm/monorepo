@@ -17,6 +17,9 @@ The Ruby set is the most developed, followed by the Rust crates, then the JS and
 | `cosmos-llm-tool` | Tool registration and execution for LLM function calling |
 | `cosmos-llm-tool-preset` | Ready-to-use tools: file read/write, grep, web fetch |
 | `cosmos-llm-virtual-filesystem` | Hierarchical in-memory filesystem for LLM context sandboxing |
+| `cosmos-llm-signature` | Declarative typed input/output signatures for a single LLM call |
+| `cosmos-llm-predict` | Runs signatures against models: adapters, few-shot demos, caching, composable modules |
+| `cosmos-llm-evaluate` | Scores modules against labeled devsets with parallel execution and built-in metrics |
 
 ### Rust (`lib/rust/`)
 
@@ -42,6 +45,18 @@ The Ruby set is the most developed, followed by the Rust crates, then the JS and
 ## Architecture
 
 The stack is layered. `virtual-filesystem` is the base — it has no upstream dependencies within this repo. `context` builds on it. `tool` and `tool-preset` build on `client` and `context`. This keeps each layer independently testable and usable.
+
+The Ruby set adds a second layer above the client, for programs whose prompts are declared rather than hand-written:
+
+```
+signature   typed inputs, typed outputs, instructions — no provider, no prompting
+  ↓
+predict     adapters render signatures into messages and parse replies back
+  ↓
+evaluate    scores a module over a labeled devset
+```
+
+`signature` depends on nothing else in the repo. `predict` builds on it and on `client`. `evaluate` builds on `predict`. An optimizer layer, which tunes instructions and few-shot demonstrations against an evaluation score, is the intended next step.
 
 ## Applications
 
