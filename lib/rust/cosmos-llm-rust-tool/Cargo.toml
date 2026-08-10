@@ -12,7 +12,14 @@ keywords = ["llm", "ai", "tool", "function-calling", "agent"]
 categories = ["api-bindings"]
 
 [features]
-webfetch = ["dep:reqwest", "dep:tokio"]
+default = ["async"]
+# Async handlers, `Executor::execute_async`, per-tool timeouts, and
+# `Executor::execute_all`. On by default because most real tools are I/O-bound,
+# but separable: a consumer with only synchronous tools should not have to pull
+# in `futures` or a runtime.
+async = ["dep:futures-util", "dep:tokio"]
+# The `webfetch` preset. Implies `async` — it is an HTTP tool.
+webfetch = ["async", "dep:reqwest"]
 
 [dependencies]
 thiserror = "2"
@@ -21,7 +28,9 @@ serde_json = "1"
 regex = "1"
 cosmos-llm-virtual-filesystem = { path = "../cosmos-llm-rust-virtual-filesystem" }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
-tokio = { version = "1", features = ["rt-multi-thread"], optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio = { version = "1", features = ["rt", "time"], optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+tokio-test = "0.4"
