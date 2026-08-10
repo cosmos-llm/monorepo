@@ -399,6 +399,40 @@ impl CosmosError {
     }
 }
 
+/// Lets a [`RetryPolicy`](retry_policy::RetryPolicy) schedule around these
+/// errors.
+///
+/// The division of labour the `retry-policy` crate is built around: this crate
+/// owns classification, that crate owns the schedule. Both methods just forward
+/// to the inherent ones, so there is exactly one definition of what is
+/// retryable.
+///
+/// # Examples
+///
+/// ```
+/// use std::time::Duration;
+/// use cosmos_llm::CosmosError;
+/// use retry_policy::Retryable;
+///
+/// let err = CosmosError::RateLimit {
+///     provider: "openai".into(),
+///     message: "slow down".into(),
+///     retry_after: Some(Duration::from_secs(5)),
+/// };
+///
+/// assert!(Retryable::is_retryable(&err));
+/// assert_eq!(Retryable::retry_after(&err), Some(Duration::from_secs(5)));
+/// ```
+impl retry_policy::Retryable for CosmosError {
+    fn is_retryable(&self) -> bool {
+        CosmosError::is_retryable(self)
+    }
+
+    fn retry_after(&self) -> Option<Duration> {
+        CosmosError::retry_after(self)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -112,6 +112,7 @@ dependencies = [
  "futures-util",
  "mockito",
  "reqwest",
+ "retry-policy",
  "serde",
  "serde_json",
  "thiserror",
@@ -831,6 +832,13 @@ dependencies = [
  "wasm-streams",
  "web-sys",
  "webpki-roots",
+]
+
+[[package]]
+name = "retry-policy"
+version = "0.1.0"
+dependencies = [
+ "tokio",
 ]
 
 [[package]]

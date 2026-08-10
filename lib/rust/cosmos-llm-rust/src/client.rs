@@ -1,3 +1,5 @@
+use retry_policy::RetryPolicy;
+
 use crate::config::Config;
 use crate::error::CosmosError;
 use crate::providers::{resolve, resolve_with_base_url, CompletionStream, Provider};
@@ -29,6 +31,11 @@ use crate::types::{CompletionRequest, CompletionResponse, Message, StreamAccumul
 pub struct Client {
     provider: Box<dyn Provider>,
     default_model: Option<String>,
+    /// Retry schedule, or `None` to make exactly one attempt.
+    ///
+    /// Off unless a caller opts in with [`Client::with_retry`]. See that method
+    /// for why the default is off.
+    retry: Option<RetryPolicy>,
 }
 
 impl Client {
@@ -62,6 +69,7 @@ impl Client {
         Ok(Self {
             provider,
             default_model: model,
+            retry: None,
         })
     }
 
@@ -89,6 +97,7 @@ impl Client {
         Ok(Self {
             provider,
             default_model: None,
+            retry: None,
         })
     }
 
@@ -117,6 +126,7 @@ impl Client {
         Self {
             provider,
             default_model: None,
+            retry: None,
         }
     }
 
@@ -161,6 +171,7 @@ impl Client {
         Ok(Self {
             provider,
             default_model: None,
+            retry: None,
         })
     }
 
@@ -177,6 +188,75 @@ impl Client {
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
         self
+    }
+
+    /// Retries failed requests according to `policy` (builder pattern).
+    ///
+    /// **Off by default, and deliberately so.** A library that silently retries
+    /// surprises a caller who is already retrying itself, turning three attempts
+    /// into nine. It also spends money: every retry against a metered API is
+    /// another charge on someone's account. Opting in is the caller saying they
+    /// have accounted for both.
+    ///
+    /// Only errors that [`CosmosError::is_retryable`] accepts are retried, and a
+    /// provider's `Retry-After` is honored when it sent one. Applies to
+    /// [`Client::completion`] and [`Client::complete`]. It does **not** apply to
+    /// the streaming methods: re-running a stream that already yielded chunks
+    /// would replay output the caller has seen, and deciding what to do about
+    /// that belongs to the caller.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use cosmos_llm::Client;
+    /// use retry_policy::RetryPolicy;
+    ///
+    /// let client = Client::new("openai", "sk-test")
+    ///     .unwrap()
+    ///     .with_model("gpt-4o")
+    ///     .with_retry(
+    ///         RetryPolicy::new()
+    ///             .max_attempts(4)
+    ///             .initial_backoff(Duration::from_millis(500)),
+    ///     );
+    /// ```
+    pub fn with_retry(mut self, policy: RetryPolicy) -> Self {
+        self.retry = Some(policy);
+        self
+    }
+
+    /// Stops retrying failed requests, returning to the default.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    /// use retry_policy::RetryPolicy;
+    ///
+    /// let client = Client::new("openai", "sk-test")
+    ///     .unwrap()
+    ///     .with_retry(RetryPolicy::new())
+    ///     .without_retry();
+    /// assert!(client.retry_policy().is_none());
+    /// ```
+    pub fn without_retry(mut self) -> Self {
+        self.retry = None;
+        self
+    }
+
+    /// Returns the configured retry policy, if any.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    ///
+    /// let client = Client::new("openai", "sk-test").unwrap();
+    /// assert!(client.retry_policy().is_none());
+    /// ```
+    pub fn retry_policy(&self) -> Option<&RetryPolicy> {
+        self.retry.as_ref()
     }
 
     /// Switches to a different provider, preserving the default model.
@@ -277,8 +357,10 @@ impl Client {
                 message: "no default model set; call .with_model() or set it in Config".to_owned(),
             })?;
 
+        // Through `completion` rather than straight to the provider, so a
+        // configured retry policy applies here too.
         let req = CompletionRequest::new(model, vec![Message::user(prompt)]);
-        let resp = self.provider.completion(&req).await?;
+        let resp = self.completion(req).await?;
 
         resp.content()
             .map(str::to_owned)
@@ -316,7 +398,19 @@ impl Client {
         mut req: CompletionRequest,
     ) -> Result<CompletionResponse, CosmosError> {
         self.fill_default_model(&mut req)?;
-        self.provider.completion(&req).await
+
+        let Some(policy) = self.retry.as_ref() else {
+            return self.provider.completion(&req).await;
+        };
+
+        // The attempt history is discarded here because `completion` returns
+        // `CosmosError`, not a retry error. Callers who need the history should
+        // drive `RetryPolicy` themselves; folding a second error type into this
+        // signature would be a breaking change for every existing caller.
+        policy
+            .run(|| self.provider.completion(&req))
+            .await
+            .map_err(retry_policy::RetryError::into_last_error)
     }
 
     /// Sends a chat conversation and returns the provider response.
