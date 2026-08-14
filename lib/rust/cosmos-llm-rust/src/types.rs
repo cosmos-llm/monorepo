@@ -391,14 +391,72 @@ impl CompletionRequest {
 }
 
 /// Token usage reported by the provider.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+///
+/// Every field is `#[serde(default)]`: providers disagree about which counts
+/// they return, and a missing count should read as zero rather than fail the
+/// whole response.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Usage {
     /// Tokens consumed by the prompt.
+    #[serde(default)]
     pub prompt_tokens: u32,
     /// Tokens generated in the completion.
+    #[serde(default)]
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion).
+    #[serde(default)]
     pub total_tokens: u32,
+    /// What the account was actually charged for this call, in US dollars.
+    ///
+    /// `None` from every provider that does not report it, which is most of
+    /// them — a token count is not a price, and deriving one from a local
+    /// table means carrying a table that drifts every time a provider
+    /// repositions a model. OpenRouter returns a real charged figure when the
+    /// request asks for it, so that is the one provider where this is
+    /// populated.
+    ///
+    /// Treat `None` as "unknown", never as "free": a budget that sums costs
+    /// across providers is only counting the ones that told it anything.
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+impl Usage {
+    /// Creates a usage record from token counts, with no cost attached.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Usage;
+    ///
+    /// let usage = Usage::from_tokens(10, 5);
+    /// assert_eq!(usage.total_tokens, 15);
+    /// assert!(usage.cost.is_none());
+    /// ```
+    pub fn from_tokens(prompt_tokens: u32, completion_tokens: u32) -> Self {
+        Self {
+            prompt_tokens,
+            completion_tokens,
+            total_tokens: prompt_tokens.saturating_add(completion_tokens),
+            cost: None,
+        }
+    }
+
+    /// Attaches a charged cost in US dollars, returning `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Usage;
+    ///
+    /// let usage = Usage::from_tokens(10, 5).with_cost(0.00042);
+    /// assert_eq!(usage.cost, Some(0.00042));
+    /// ```
+    #[must_use]
+    pub fn with_cost(mut self, cost: f64) -> Self {
+        self.cost = Some(cost);
+        self
+    }
 }
 
 /// A single tool call requested by the model, normalized across providers.
@@ -1168,15 +1226,64 @@ mod tests {
         let mut acc = StreamAccumulator::new();
         acc.push(&StreamChunk::text("hi"));
         acc.push(&StreamChunk {
-            usage: Some(Usage {
-                prompt_tokens: 3,
-                completion_tokens: 1,
-                total_tokens: 4,
-            }),
+            usage: Some(Usage::from_tokens(3, 1)),
             finish_reason: Some("stop".into()),
             ..Default::default()
         });
         assert_eq!(acc.usage().unwrap().total_tokens, 4);
         assert_eq!(acc.into_response().usage.unwrap().prompt_tokens, 3);
+    }
+
+    #[test]
+    fn usage_from_tokens_sums_the_total_and_leaves_cost_unknown() {
+        let usage = Usage::from_tokens(10, 5);
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn usage_from_tokens_saturates_rather_than_overflowing() {
+        let usage = Usage::from_tokens(u32::MAX, 10);
+        assert_eq!(usage.total_tokens, u32::MAX);
+    }
+
+    #[test]
+    fn usage_with_cost_attaches_a_price() {
+        assert_eq!(Usage::from_tokens(1, 1).with_cost(0.5).cost, Some(0.5));
+    }
+
+    #[test]
+    fn usage_deserializes_a_body_without_a_cost() {
+        // Every provider but OpenRouter reports this shape. It must parse.
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15
+        }))
+        .unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn usage_deserializes_a_body_with_a_cost() {
+        let usage: Usage = serde_json::from_value(serde_json::json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "cost": 0.0012
+        }))
+        .unwrap();
+        assert_eq!(usage.cost, Some(0.0012));
+    }
+
+    #[test]
+    fn usage_deserializes_a_partial_body() {
+        // A provider that reports only a total should not fail the response.
+        let usage: Usage = serde_json::from_value(serde_json::json!({"total_tokens": 7})).unwrap();
+        assert_eq!(usage.total_tokens, 7);
+        assert_eq!(usage.prompt_tokens, 0);
     }
 }

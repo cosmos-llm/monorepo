@@ -294,6 +294,8 @@ impl OpenAiProvider {
                 prompt_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: body["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
+                // OpenAI bills from token counts; it reports no per-call price.
+                cost: None,
             })
         } else {
             None
@@ -382,6 +384,7 @@ pub(crate) fn parse_openai_chunk(
             prompt_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
             completion_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
             total_tokens: value["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
+            cost: None,
         })
     } else {
         None

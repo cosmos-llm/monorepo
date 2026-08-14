@@ -336,11 +336,7 @@ impl MockProvider {
             String::new(),
             calls,
             "tool_calls",
-            Some(Usage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            }),
+            Some(Usage::default()),
         ))));
         self
     }
@@ -739,12 +735,7 @@ fn response_of(
 /// proportional to the input, which is what a usage-accounting test needs: a
 /// longer response must report more tokens.
 fn estimated_usage(completion: &str) -> Usage {
-    let completion_tokens = tokens_in(completion);
-    Usage {
-        prompt_tokens: 0,
-        completion_tokens,
-        total_tokens: completion_tokens,
-    }
+    Usage::from_tokens(0, tokens_in(completion))
 }
 
 /// Rough token count: one per four characters, minimum one for any text.
@@ -773,11 +764,7 @@ fn canned_response(canned: &Canned, req: &CompletionRequest) -> CompletionRespon
     let completion_tokens = tokens_in(&text);
 
     let mut resp = response_of(text, Vec::new(), "stop", None);
-    resp.usage = Some(Usage {
-        prompt_tokens,
-        completion_tokens,
-        total_tokens: prompt_tokens + completion_tokens,
-    });
+    resp.usage = Some(Usage::from_tokens(prompt_tokens, completion_tokens));
     resp
 }
 

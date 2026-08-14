@@ -321,6 +321,8 @@ impl AnthropicProvider {
                 total_tokens: (body["usage"]["input_tokens"].as_u64().unwrap_or(0)
                     + body["usage"]["output_tokens"].as_u64().unwrap_or(0))
                     as u32,
+                // Anthropic bills from token counts; it reports no per-call price.
+                cost: None,
             })
         } else {
             None
@@ -474,6 +476,7 @@ fn parse_anthropic_event(
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    cost: None,
                 }
             });
             StreamChunk {

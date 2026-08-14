@@ -190,6 +190,10 @@ impl OpenRouterProvider {
     /// translation — tool results and replayed tool calls — is shared with the
     /// OpenAI provider, since the wire format is identical.
     ///
+    /// Adds one field OpenAI has no equivalent for: `usage.include`, which
+    /// makes the response report the charged dollar cost. See
+    /// [`crate::Usage::cost`].
+    ///
     /// # Errors
     ///
     /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
@@ -204,6 +208,11 @@ impl OpenRouterProvider {
         let mut body = json!({
             "model": req.model,
             "messages": messages,
+            // Ask for the dollar figure the account was actually charged.
+            // OpenRouter omits it otherwise, and a price derived locally from a
+            // token count is a guess against a table that drifts every time a
+            // provider repositions a model. Requesting it costs nothing.
+            "usage": { "include": true },
         });
 
         if let Some(t) = req.temperature {
@@ -284,6 +293,10 @@ impl OpenRouterProvider {
                 prompt_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
                 completion_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
                 total_tokens: body["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
+                // The dollar figure the account was actually charged, present
+                // only when the request asked for it (see `body`). Absent is
+                // not zero: a request sent without the flag was still billed.
+                cost: body["usage"]["cost"].as_f64(),
             })
         } else {
             None
@@ -517,7 +530,41 @@ mod tests {
         assert_eq!(resp.content(), Some("Hello!"));
         assert_eq!(resp.model.as_deref(), Some("anthropic/claude-3.5-sonnet"));
         assert!(!resp.tool_use());
-        assert_eq!(resp.usage.unwrap().total_tokens, 15);
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.total_tokens, 15);
+        // A usage block without a price leaves cost unknown, not zero.
+        assert_eq!(usage.cost, None);
+    }
+
+    #[test]
+    fn map_response_reads_the_charged_cost() {
+        let body = serde_json::json!({
+            "id": "gen-1",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "Hi" },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "cost": 0.00042
+            }
+        });
+        let usage = OpenRouterProvider::map_response(body)
+            .unwrap()
+            .usage
+            .unwrap();
+        assert_eq!(usage.cost, Some(0.00042));
+    }
+
+    #[test]
+    fn request_body_asks_for_cost_accounting() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+        let body = OpenRouterProvider::build_body(&req, false).unwrap();
+        // Without this flag OpenRouter omits the price entirely.
+        assert_eq!(body["usage"]["include"], serde_json::json!(true));
     }
 
     #[test]
