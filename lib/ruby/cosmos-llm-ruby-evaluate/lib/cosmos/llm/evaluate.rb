@@ -4,6 +4,7 @@ require 'cosmos/llm/predict'
 
 require_relative 'evaluate/version'
 require_relative 'evaluate/errors'
+require_relative 'evaluate/evidence'
 require_relative 'evaluate/metrics'
 require_relative 'evaluate/result'
 require_relative 'evaluate/evaluator'

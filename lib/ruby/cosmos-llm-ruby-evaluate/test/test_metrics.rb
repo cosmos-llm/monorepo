@@ -105,6 +105,71 @@ class TestMetrics < Minitest::Test
     assert_in_delta 0.0, metric.call(*pair([], %w[a]))
   end
 
+  # --- grounded --------------------------------------------------------------
+
+  GROUNDED_SOURCE = 'They saw their conversion rate increase by 7-12% after the migration.'
+
+  def grounded_pair(extracted, source: GROUNDED_SOURCE)
+    [Example.new(document: source), Prediction.new(findings: extracted)]
+  end
+
+  def test_grounded_scores_one_when_every_quote_is_supported
+    metric = Metrics.grounded(:findings, source: :document)
+    extracted = [{ 'evidence' => 'conversion rate increase by 7-12%' }]
+
+    assert_in_delta 1.0, metric.call(*grounded_pair(extracted))
+  end
+
+  def test_grounded_scores_the_supported_fraction
+    metric = Metrics.grounded(:findings, source: :document)
+    extracted = [
+      { 'evidence' => 'conversion rate increase by 7-12%' },
+      { 'evidence' => 'revenue tripled overnight' }
+    ]
+
+    assert_in_delta 0.5, metric.call(*grounded_pair(extracted))
+  end
+
+  def test_grounded_scores_zero_when_nothing_is_supported
+    metric = Metrics.grounded(:findings, source: :document)
+    extracted = [{ 'evidence' => 'an invented claim' }]
+
+    assert_in_delta 0.0, metric.call(*grounded_pair(extracted))
+  end
+
+  def test_grounded_credits_an_extraction_that_found_nothing
+    metric = Metrics.grounded(:findings, source: :document)
+
+    assert_in_delta 1.0, metric.call(*grounded_pair([]))
+  end
+
+  def test_grounded_can_penalize_a_missing_quote
+    metric = Metrics.grounded(:findings, source: :document, empty_score: 0.0)
+
+    assert_in_delta 0.0, metric.call(*grounded_pair([]))
+  end
+
+  def test_grounded_scores_zero_without_a_source_document
+    metric = Metrics.grounded(:findings, source: :document)
+    pair = [Example.new(other: 'x'), Prediction.new(findings: [{ 'evidence' => 'anything' }])]
+
+    assert_in_delta 0.0, metric.call(*pair)
+  end
+
+  def test_grounded_honors_a_custom_quote_key
+    metric = Metrics.grounded(:findings, source: :document, key: 'quote')
+    extracted = [{ 'quote' => 'conversion rate increase by 7-12%' }]
+
+    assert_in_delta 1.0, metric.call(*grounded_pair(extracted))
+  end
+
+  def test_grounded_rejects_a_quote_stitched_from_scattered_words
+    metric = Metrics.grounded(:findings, source: :document)
+    extracted = [{ 'evidence' => 'conversion migration 7-12% saw' }]
+
+    assert_in_delta 0.0, metric.call(*grounded_pair(extracted))
+  end
+
   def test_all_of_requires_every_metric
     metric = Metrics.all_of(Metrics.exact_match(:answer), Metrics.contains(:answer))
 

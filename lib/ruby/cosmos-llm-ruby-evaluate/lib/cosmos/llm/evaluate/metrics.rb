@@ -107,6 +107,45 @@ module Cosmos
           end
         end
 
+        # Scores the fraction of a prediction's quotes that appear in the source.
+        #
+        # This is the metric for extraction work: the prediction carries claims
+        # with an +evidence+ quote attached to each, and the score is how many
+        # of those quotes are actually in the document. A model that invents
+        # support scores low even when its claims sound right, which is the
+        # failure no answer-comparison metric detects.
+        #
+        # Unlike {contains}, comparison is a contiguous substring match after
+        # Unicode-aware normalization, so a quote survives markdown conversion
+        # and line rewrapping but a claim stitched together from scattered
+        # words does not. See {Evidence} for what is and is not forgiven.
+        #
+        # A prediction carrying no quotes scores 1.0 by default: an extraction
+        # that correctly found nothing has invented nothing. Pass
+        # +empty_score: 0.0+ where a missing quote should count against it.
+        #
+        # @param field [Symbol] the prediction field holding the extracted
+        #   structure to check
+        # @param source [Symbol] the example field holding the source document
+        # @param key [String] the field name holding quotes
+        # @param empty_score [Float] the score when the prediction has no quotes
+        # @return [Proc] a metric returning a score in 0.0..1.0
+        # @example
+        #   Metrics.grounded(:findings, source: :document)
+        def grounded(field = :answer, source: :document, key: 'evidence', empty_score: 1.0)
+          lambda do |example, prediction|
+            text = value_of(example, source)
+            extracted = value_of(prediction, field)
+            next 0.0 if text.nil? || extracted.nil?
+
+            quotes = Evidence.collect(extracted, key: key)
+            next empty_score if quotes.empty?
+
+            supported = quotes.count { |(_path, quote)| Evidence.present?(quote, text) }
+            supported.to_f / quotes.length
+          end
+        end
+
         # Builds a metric that passes only when every supplied metric passes.
         #
         # @param metrics [Array<#call>] the metrics to combine
