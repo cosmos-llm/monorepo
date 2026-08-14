@@ -20,6 +20,11 @@ default = ["async"]
 async = ["dep:futures-util", "dep:tokio"]
 # The `webfetch` preset. Implies `async` — it is an HTTP tool.
 webfetch = ["async", "dep:reqwest"]
+# `AgentLoop`, which drives a model through a toolset. Implies `async` and
+# pulls in the client crate, so it is off by default: registering tools and
+# rendering their schemas needs neither, and a consumer that hands its schemas
+# to some other client should not have to compile an HTTP stack for it.
+agent = ["async", "dep:cosmos-llm"]
 
 [dependencies]
 thiserror = "2"
@@ -27,6 +32,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 regex = "1"
 cosmos-llm-virtual-filesystem = { path = "../cosmos-llm-rust-virtual-filesystem" }
+cosmos-llm = { path = "../cosmos-llm-rust", optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
 futures-util = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["rt", "time"], optional = true }

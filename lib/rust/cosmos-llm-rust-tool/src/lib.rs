@@ -65,17 +65,78 @@
 //!
 //! The `async` feature is on by default; turning it off leaves the sync half
 //! intact with no `futures` or runtime dependency.
+//!
+//! ## Running an agent
+//!
+//! Defining tools and rendering their schemas needs no LLM client — a consumer
+//! who hands those schemas to some other client stops here. Enable the `agent`
+//! feature to also get [`AgentLoop`], which drives a model through the toolset
+//! until it stops calling tools:
+//!
+//! ```toml
+//! cosmos-llm-tool = { version = "0.1", features = ["agent"] }
+//! ```
+//!
+//! ```rust
+//! # #[cfg(feature = "agent")]
+//! # {
+//! use cosmos_llm_tool::{AgentLoop, Registry, Session, StopReason};
+//! use std::sync::Arc;
+//!
+//! # let registry = Registry::new();
+//! // Caps the tools enforce, and a budget the loop enforces.
+//! let session = Arc::new(Session::with_budgets([("search", 40), ("open", 25)]));
+//!
+//! let agent = AgentLoop::new(registry)
+//!     .with_model("claude-opus-4")
+//!     .with_system("You are a research assistant.")
+//!     .with_session(Arc::clone(&session))
+//!     .with_budget(|usage| usage.total_tokens < 100_000)
+//!     .with_max_steps(20);
+//!
+//! // Against OpenRouter, which reports the charged price, budget in dollars
+//! // instead. Other providers report no price, so `cost` stays `None` there
+//! // and a dollar ceiling would never trip — budget on tokens for those.
+//! # let registry2 = Registry::new();
+//! let priced = AgentLoop::new(registry2)
+//!     .with_budget(|usage| usage.cost_or_zero() < 0.50);
+//!
+//! # async fn run(agent: AgentLoop, client: &cosmos_llm::Client) {
+//! let outcome = agent.run(client, "What changed in Q3?").await.unwrap();
+//! match outcome.reason {
+//!     StopReason::Finished => println!("{}", outcome.text),
+//!     StopReason::Steps => eprintln!("hit the step cap"),
+//!     StopReason::Budget => eprintln!("hit the token ceiling"),
+//! }
+//! # }
+//! # }
+//! ```
+//!
+//! The loop is provider-neutral: it speaks the normalized
+//! `cosmos_llm::ToolCall`, so the same code runs against OpenAI and Anthropic
+//! without a dialect switch. [`Session`] and [`Progress`] need no client and
+//! are available without the feature.
 
 pub mod definition;
 pub mod error;
 pub mod executor;
 pub mod parameter;
 pub mod preset;
+pub mod progress;
 pub mod registry;
 pub mod schemas;
+pub mod session;
+
+#[cfg(feature = "agent")]
+pub mod agent;
 
 pub use definition::{Handler, ToolDefinition};
 pub use error::ToolError;
 pub use executor::Executor;
 pub use parameter::ParameterType;
+pub use progress::Progress;
 pub use registry::Registry;
+pub use session::Session;
+
+#[cfg(feature = "agent")]
+pub use agent::{AgentLoop, LoopEvent, RunOutcome, StopReason, TokenUsage};
