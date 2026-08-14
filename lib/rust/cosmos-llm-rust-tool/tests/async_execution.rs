@@ -127,7 +127,10 @@ async fn concurrency_never_exceeds_the_bound() {
     let observed = peak.load(Ordering::SeqCst);
     // Bounded above, and genuinely concurrent below: a bound that silently
     // serialised everything would also satisfy `<= 4`.
-    assert!(observed <= 4, "peak concurrency {observed} exceeded the bound");
+    assert!(
+        observed <= 4,
+        "peak concurrency {observed} exceeded the bound"
+    );
     assert!(observed > 1, "nothing ran concurrently (peak {observed})");
 }
 
