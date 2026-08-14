@@ -25,6 +25,18 @@ module Cosmos
       # verbatim. Non-Anthropic providers that don't understand content-block
       # messages or +tool_use?+/+tool_calls+/+text+ are not supported yet.
       #
+      # ## Why a run ends
+      #
+      # A run reports +:reason+ rather than merely stopping, because "the
+      # model decided it was finished" and "it hit the step cap" mean very
+      # different things when reading a run afterwards, and a bare step count
+      # cannot tell them apart:
+      #
+      #   +:finished+  the model stopped calling tools, or a tool called
+      #                +Session#finish!+
+      #   +:steps+     +max_steps+ was reached with the model still working
+      #   +:budget+    the +budget+ callback stopped the run mid-flight
+      #
       # @example Run a tool loop against the Anthropic provider
       #   client = Cosmos::Llm::Client.new(:anthropic, model: 'claude-3-5-sonnet-20240620')
       #   registry = Cosmos::Llm::Tool::Registry.new
@@ -54,13 +66,25 @@ module Cosmos
         # @param max_steps [Integer] hard cap on model turns
         # @param schema [Symbol] which tool schema to send to the provider
         #   (+:anthropic+ or +:openai+)
+        # @param session [Session, nil] per-run state shared with the tools. When
+        #   given, the loop stops as soon as +session.finished?+ is true, which is
+        #   how a +done+ tool ends a run before +max_steps+.
+        # @param budget [Proc, nil] called after each turn with the usage totals
+        #   accumulated so far (+{ prompt_tokens:, completion_tokens:, total_tokens:,
+        #   steps: }+). Returning false stops the run with +:budget+. Tokens are
+        #   zero for providers that report no usage.
+        # @param on_event [Proc, nil] called with +(kind, payload)+ as the run
+        #   proceeds: +:text+ with the assistant's text, +:tool+ with
+        #   +{ name:, input:, result: }+ per dispatched call.
         # @yield [call] optional block to handle a tool call instead of dispatching
         #   through +tools+. Receives a ToolCall and must return the result content.
         #   Takes priority over registry dispatch when given.
         # @yieldparam call [ToolCall] a normalized tool call to execute
         # @yieldreturn [String] the tool result content
-        # @return [Hash] +{ text:, steps_taken: }+ — the model's final text output
-        #   and the number of turns actually taken
+        # @return [Hash] +{ text:, steps_taken:, reason:, usage:, messages: }+ —
+        #   the model's final text, turns taken, why the run ended (+:finished+,
+        #   +:steps+, or +:budget+), accumulated token usage, and the full message
+        #   history.
         # @raise [ToolNotFoundError] if a call names a tool not present in +tools+
         #   and no block is given
         # @example Dispatch through a registry
@@ -69,7 +93,11 @@ module Cosmos
         #   Loop.run(client: client, tools: registry, system: sys, user: msg, max_steps: 5) do |call|
         #     "handled #{call.name}"
         #   end
-        def self.run(client:, tools:, user:, system: nil, max_steps: 10, schema: :anthropic, &dispatch)
+        # @example Stop on a token ceiling
+        #   Loop.run(client: client, tools: registry, user: msg,
+        #            budget: ->(u) { u[:total_tokens] < 100_000 })
+        def self.run(client:, tools:, user:, system: nil, max_steps: 10, schema: :anthropic,
+                     session: nil, budget: nil, on_event: nil, &dispatch)
           registry = as_registry(tools)
           tool_schemas = registry.all.map { |tool| tool_schema(tool, schema) }
           dispatch ||= ->(call) { registry_dispatch(registry, call) }
@@ -77,6 +105,8 @@ module Cosmos
           messages = [{ role: 'user', content: user }]
           last_text = ''
           steps_taken = 0
+          usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, steps: 0 }
+          reason = :finished
 
           max_steps.times do |i|
             steps_taken = i + 1
@@ -84,15 +114,34 @@ module Cosmos
               **{ messages: messages, tools: tool_schemas }.tap { |p| p[:system] = system if system }
             )
             last_text = response.text.to_s unless response.text.to_s.empty?
+            accumulate_usage(usage, response, steps_taken)
 
             calls = normalize_tool_calls(response)
-            break if calls.empty?
+            if calls.empty?
+              on_event&.call(:text, response.text.to_s)
+              reason = :finished
+              break
+            end
 
             messages << assistant_message(response, calls)
-            messages << tool_results_message(calls, &dispatch)
+            messages << tool_results_message(calls, on_event, &dispatch)
+
+            # A tool that called `finish!` ends the run here rather than at the
+            # next model turn, so a `done` call does not cost an extra request.
+            if session&.finished?
+              reason = :finished
+              break
+            end
+
+            if budget && !budget.call(usage)
+              reason = :budget
+              break
+            end
+
+            reason = :steps if steps_taken >= max_steps
           end
 
-          { text: last_text, steps_taken: steps_taken }
+          { text: last_text, steps_taken: steps_taken, reason: reason, usage: usage, messages: messages }
         end
 
         # @api private
@@ -159,8 +208,33 @@ module Cosmos
         end
         private_class_method :assistant_message
 
+        # Adds a response's token usage to the running totals.
+        #
+        # Providers vary in what they report and some report nothing at all, so
+        # every field is read defensively — a missing usage block leaves the
+        # totals untouched rather than raising partway through a run.
+        #
         # @api private
-        def self.tool_results_message(calls, &dispatch)
+        def self.accumulate_usage(usage, response, steps)
+          usage[:steps] = steps
+          return unless response.respond_to?(:usage)
+
+          reported = response.usage
+          return if reported.nil?
+
+          %i[prompt_tokens completion_tokens total_tokens].each do |field|
+            value = if reported.respond_to?(field)
+                      reported.public_send(field)
+                    elsif reported.respond_to?(:[])
+                      reported[field] || reported[field.to_s]
+                    end
+            usage[field] += value.to_i
+          end
+        end
+        private_class_method :accumulate_usage
+
+        # @api private
+        def self.tool_results_message(calls, on_event = nil, &dispatch)
           blocks = calls.map do |call|
             result = begin
               dispatch.call(call)
@@ -169,6 +243,7 @@ module Cosmos
             rescue StandardError => e
               "Tool error: #{e.message}"
             end
+            on_event&.call(:tool, { name: call.name, input: call.input, result: result })
             {
               'type' => 'tool_result',
               'tool_use_id' => call.id,

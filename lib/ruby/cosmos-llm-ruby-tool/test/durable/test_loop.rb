@@ -155,6 +155,152 @@ module Cosmos
 
           refute client.requests.first.key?(:system)
         end
+
+        # --- stop reasons ----------------------------------------------------
+
+        def test_reason_is_finished_when_the_model_stops_calling_tools
+          client = FakeClient.new { |_params, _n| FakeResponse.new('done', false, []) }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5)
+
+          assert_equal :finished, result[:reason]
+        end
+
+        def test_reason_is_steps_when_the_cap_is_hit_mid_work
+          call = { 'id' => 'call_1', 'name' => 'echo', 'input' => { 'value' => 'x' } }
+          client = FakeClient.new { |_params, _n| FakeResponse.new('mid', true, [call]) }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 3)
+
+          assert_equal :steps, result[:reason]
+          assert_equal 3, result[:steps_taken]
+        end
+
+        def test_session_finish_ends_the_run_without_another_request
+          call = { 'id' => 'call_1', 'name' => 'done', 'input' => {} }
+          client = FakeClient.new { |_params, _n| FakeResponse.new('', true, [call]) }
+          session = Session.new
+
+          done_tool = Definition.new(:done) do
+            description 'Finish'
+            execute { 'done' }
+          end
+
+          result = Loop.run(client: client, tools: [done_tool], user: 'hi', max_steps: 5,
+                            session: session) do |_tool_call|
+            session.finish!('all set')
+            'done'
+          end
+
+          assert_equal :finished, result[:reason]
+          assert_equal 1, result[:steps_taken]
+          # The run ends on the turn the tool finished, not the turn after.
+          assert_equal 1, client.requests.length
+          assert_equal ['all set'], session.notes
+        end
+
+        def test_budget_callback_stops_the_run
+          call = { 'id' => 'call_1', 'name' => 'echo', 'input' => { 'value' => 'x' } }
+          client = FakeClient.new { |_params, _n| FakeResponse.new('mid', true, [call]) }
+
+          seen = []
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 10,
+                            budget: lambda { |usage|
+                              seen << usage[:steps]
+                              usage[:steps] < 2
+                            })
+
+          assert_equal :budget, result[:reason]
+          assert_equal 2, result[:steps_taken]
+          assert_equal [1, 2], seen
+        end
+
+        def test_budget_is_not_consulted_when_the_model_stops_on_its_own
+          client = FakeClient.new { |_params, _n| FakeResponse.new('done', false, []) }
+
+          called = false
+          Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5,
+                   budget: ->(_usage) { called = true })
+
+          refute called
+        end
+
+        # --- usage accounting ------------------------------------------------
+
+        FakeUsage = Struct.new(:prompt_tokens, :completion_tokens, :total_tokens)
+
+        UsageResponse = Struct.new(:text, :tool_use, :raw_tool_calls, :usage) do
+          def tool_use?
+            tool_use
+          end
+
+          def tool_calls
+            raw_tool_calls
+          end
+        end
+
+        def test_usage_accumulates_across_turns
+          call = { 'id' => 'call_1', 'name' => 'echo', 'input' => { 'value' => 'x' } }
+          responses = [
+            UsageResponse.new('', true, [call], FakeUsage.new(10, 5, 15)),
+            UsageResponse.new('done', false, [], FakeUsage.new(20, 4, 24))
+          ]
+          client = FakeClient.new { |_params, n| responses[n - 1] }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5)
+
+          assert_equal 30, result[:usage][:prompt_tokens]
+          assert_equal 9, result[:usage][:completion_tokens]
+          assert_equal 39, result[:usage][:total_tokens]
+          assert_equal 2, result[:usage][:steps]
+        end
+
+        def test_usage_tolerates_a_provider_that_reports_none
+          client = FakeClient.new { |_params, _n| FakeResponse.new('done', false, []) }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5)
+
+          assert_equal 0, result[:usage][:total_tokens]
+          assert_equal 1, result[:usage][:steps]
+        end
+
+        def test_usage_reads_a_hash_shaped_usage_block
+          hash_usage = UsageResponse.new('done', false, [], { 'prompt_tokens' => 7, 'total_tokens' => 9 })
+          client = FakeClient.new { |_params, _n| hash_usage }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5)
+
+          assert_equal 7, result[:usage][:prompt_tokens]
+          assert_equal 9, result[:usage][:total_tokens]
+        end
+
+        # --- events ----------------------------------------------------------
+
+        def test_on_event_reports_tool_calls_and_final_text
+          call = { 'id' => 'call_1', 'name' => 'echo', 'input' => { 'value' => 'hello' } }
+          responses = [
+            FakeResponse.new('', true, [call]),
+            FakeResponse.new('all done', false, [])
+          ]
+          client = FakeClient.new { |_params, n| responses[n - 1] }
+
+          events = []
+          Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5,
+                   on_event: ->(kind, payload) { events << [kind, payload] })
+
+          assert_equal %i[tool text], events.map(&:first)
+          assert_equal :echo, events[0][1][:name]
+          assert_equal 'echoed:hello', events[0][1][:result]
+          assert_equal 'all done', events[1][1]
+        end
+
+        def test_messages_are_returned_for_inspection
+          client = FakeClient.new { |_params, _n| FakeResponse.new('done', false, []) }
+
+          result = Loop.run(client: client, tools: [@echo_tool], user: 'hi', max_steps: 5)
+
+          assert_equal [{ role: 'user', content: 'hi' }], result[:messages]
+        end
       end
     end
   end
