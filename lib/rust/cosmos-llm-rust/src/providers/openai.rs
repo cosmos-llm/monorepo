@@ -306,6 +306,7 @@ impl OpenAiProvider {
             model,
             choices,
             usage,
+            route: None,
         })
     }
 

@@ -393,6 +393,7 @@ impl MockProvider {
     ///         tool_calls: vec![],
     ///     }],
     ///     usage: None,
+    ///     route: None,
     /// });
     /// assert_eq!(provider.remaining(), 1);
     /// ```
@@ -726,6 +727,7 @@ fn response_of(
             tool_calls,
         }],
         usage,
+        route: None,
     }
 }
 
@@ -1333,6 +1335,7 @@ mod tests {
                 tool_calls: vec![],
             }],
             usage: None,
+            route: None,
         });
 
         let resp = provider.completion(&req("hi")).await.unwrap();

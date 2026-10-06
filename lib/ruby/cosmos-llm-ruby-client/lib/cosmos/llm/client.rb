@@ -377,6 +377,24 @@ module Cosmos
         self
       end
 
+      # Sets the OpenRouter provider-routing preference for the next request
+      #
+      # Only OpenRouter reads this; sending it to another provider is harmless
+      # but does nothing. Like the other fluent setters, it applies to the next
+      # request and is then cleared.
+      #
+      # @param routing [Cosmos::Llm::Providers::OpenRouter::Routing, Hash] the
+      #   routing preference
+      # @return [self] for method chaining
+      # @example Pin the next request to one upstream
+      #   Routing = Cosmos::Llm::Providers::OpenRouter::Routing
+      #   client.with_provider_routing(Routing.pinned_to('together'))
+      #         .completion(messages: msgs)
+      def with_provider_routing(routing)
+        @next_provider_routing = routing
+        self
+      end
+
       # Creates a copy of the client with different configuration
       #
       # @param options [Hash] New configuration options
@@ -402,6 +420,7 @@ module Cosmos
         params[:tool_choice] = @next_tool_choice if @next_tool_choice
         params[:top_p] = @next_top_p if @next_top_p
         params[:stop] = @next_stop if @next_stop
+        params[:provider] = provider_routing_hash if @next_provider_routing
 
         # Handle system message
         if @next_system
@@ -416,8 +435,17 @@ module Cosmos
         @next_system = nil
         @next_top_p = nil
         @next_stop = nil
+        @next_provider_routing = nil
 
         params
+      end
+
+      # Normalizes the pending routing preference to the hash the API expects
+      #
+      # @return [Hash] the `provider` block
+      def provider_routing_hash
+        routing = @next_provider_routing
+        routing.respond_to?(:to_h) ? routing.to_h : routing
       end
 
       # Ensures provider is initialized before making requests

@@ -338,6 +338,7 @@ impl AnthropicProvider {
                 tool_calls,
             }],
             usage,
+            route: None,
         })
     }
 

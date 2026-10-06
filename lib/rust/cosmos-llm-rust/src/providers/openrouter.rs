@@ -11,6 +11,7 @@ use crate::providers::{
     map_openai_error, retry_after_from_headers, stream_from_response, transport_error,
     CompletionStream, Provider,
 };
+use crate::routing::OpenRouterRouting;
 use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
 
 /// Default API root, used unless overridden by
@@ -62,6 +63,8 @@ pub struct OpenRouterProvider {
     base_url: String,
     referer: Option<String>,
     title: Option<String>,
+    routing: Option<OpenRouterRouting>,
+    report_route: bool,
     http: HttpClient,
 }
 
@@ -92,6 +95,8 @@ impl OpenRouterProvider {
                 .unwrap_or_else(|_| DEFAULT_BASE_URL.to_owned()),
             referer: std::env::var("OPENROUTER_REFERER").ok(),
             title: std::env::var("OPENROUTER_TITLE").ok(),
+            routing: None,
+            report_route: false,
             http: HttpClient::new(),
         }
     }
@@ -160,6 +165,74 @@ impl OpenRouterProvider {
         self
     }
 
+    /// Sets the provider-routing preference applied to every request
+    /// (builder pattern).
+    ///
+    /// This is the default, not an override: a request carrying its own
+    /// routing — see
+    /// [`CompletionRequest::with_openrouter_routing`](crate::CompletionRequest::with_openrouter_routing)
+    /// — replaces this wholesale rather than merging field by field. Merging
+    /// would make a request that sets `sort` silently inherit an `only` list
+    /// from the client, which is the opposite of what "this request routes
+    /// like *this*" should mean.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    /// use cosmos_llm::{DataCollection, OpenRouterRouting};
+    ///
+    /// // Every request from this provider avoids prompt-retaining upstreams.
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+    ///     .with_routing(OpenRouterRouting::new().data_collection(DataCollection::Deny));
+    /// assert!(provider.routing().is_some());
+    /// ```
+    pub fn with_routing(mut self, routing: OpenRouterRouting) -> Self {
+        self.routing = Some(routing);
+        self
+    }
+
+    /// Returns the default routing preference, if one is set.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    ///
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()));
+    /// assert!(provider.routing().is_none());
+    /// ```
+    pub fn routing(&self) -> Option<&OpenRouterRouting> {
+        self.routing.as_ref()
+    }
+
+    /// Asks OpenRouter to report which upstream provider served each request
+    /// (builder pattern).
+    ///
+    /// Sends the `X-OpenRouter-Metadata` header, which makes the response
+    /// carry the routing metadata that populates
+    /// [`CompletionResponse::route`](crate::CompletionResponse::route).
+    /// Off by default, because it enlarges every response for callers who
+    /// never read it.
+    ///
+    /// Worth turning on whenever a routing preference is set: it is the only
+    /// way to tell an `order` that was honoured from one that quietly fell
+    /// through to a fallback. Note that a cache hit reports nothing even with
+    /// this enabled.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::openrouter::OpenRouterProvider;
+    ///
+    /// let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+    ///     .with_route_reporting(true);
+    /// ```
+    pub fn with_route_reporting(mut self, report: bool) -> Self {
+        self.report_route = report;
+        self
+    }
+
     fn resolved_key(&self) -> Result<&str, CosmosError> {
         self.api_key
             .as_deref()
@@ -180,6 +253,9 @@ impl OpenRouterProvider {
         if let Some(ref title) = self.title {
             req = req.header("X-Title", title);
         }
+        if self.report_route {
+            req = req.header("X-OpenRouter-Metadata", "enabled");
+        }
         req
     }
 
@@ -198,7 +274,11 @@ impl OpenRouterProvider {
     ///
     /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
     /// represented, e.g. a tool result with no `tool_call_id`.
-    fn build_body(req: &CompletionRequest, stream: bool) -> Result<Value, CosmosError> {
+    fn build_body(
+        req: &CompletionRequest,
+        stream: bool,
+        default_routing: Option<&OpenRouterRouting>,
+    ) -> Result<Value, CosmosError> {
         let messages = req
             .messages
             .iter()
@@ -236,6 +316,19 @@ impl OpenRouterProvider {
         if stream {
             body["stream"] = json!(true);
             body["stream_options"] = json!({ "include_usage": true });
+        }
+
+        // The client-wide routing default. Written before `extra` so that a
+        // request carrying its own `provider` block replaces it.
+        if let Some(routing) = default_routing.filter(|r| !r.is_empty()) {
+            body["provider"] = routing.to_value();
+        }
+
+        // Caller-supplied top-level fields, last so they win. This is what
+        // carries a per-request routing block, and anything else OpenRouter
+        // accepts that this crate has no typed builder for.
+        for (key, value) in &req.extra {
+            body[key.as_str()] = value.clone();
         }
 
         Ok(body)
@@ -307,6 +400,9 @@ impl OpenRouterProvider {
             model,
             choices,
             usage,
+            // Present only when the request asked for it; see
+            // `with_route_reporting`.
+            route: crate::types::RouteInfo::from_metadata(&body["openrouter_metadata"]),
         })
     }
 
@@ -333,7 +429,7 @@ impl Provider for OpenRouterProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionResponse, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, false)?;
+            let body = Self::build_body(req, false, self.routing.as_ref())?;
 
             let request = self.authorize(
                 self.http
@@ -364,7 +460,7 @@ impl Provider for OpenRouterProvider {
     ) -> Pin<Box<dyn Future<Output = Result<CompletionStream, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
             let key = self.resolved_key()?;
-            let body = Self::build_body(req, true)?;
+            let body = Self::build_body(req, true, self.routing.as_ref())?;
 
             let request = self
                 .authorize(
@@ -444,6 +540,8 @@ mod tests {
             base_url: DEFAULT_BASE_URL.to_owned(),
             referer: None,
             title: None,
+            routing: None,
+            report_route: false,
             http: HttpClient::new(),
         }
     }
@@ -457,10 +555,10 @@ mod tests {
     fn build_body_sets_stream_flags_only_when_streaming() {
         let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
 
-        let plain = OpenRouterProvider::build_body(&req, false).unwrap();
+        let plain = OpenRouterProvider::build_body(&req, false, None).unwrap();
         assert!(plain.get("stream").is_none());
 
-        let streamed = OpenRouterProvider::build_body(&req, true).unwrap();
+        let streamed = OpenRouterProvider::build_body(&req, true, None).unwrap();
         assert_eq!(streamed["stream"], serde_json::json!(true));
         assert_eq!(streamed["stream_options"]["include_usage"], true);
     }
@@ -484,7 +582,7 @@ mod tests {
                 Message::tool_result("call_1", "found"),
             ],
         );
-        let body = OpenRouterProvider::build_body(&req, false).unwrap();
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
         let msgs = body["messages"].as_array().unwrap();
 
         assert_eq!(msgs[1]["tool_calls"][0]["id"], "call_1");
@@ -562,9 +660,124 @@ mod tests {
     #[test]
     fn request_body_asks_for_cost_accounting() {
         let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
-        let body = OpenRouterProvider::build_body(&req, false).unwrap();
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
         // Without this flag OpenRouter omits the price entirely.
         assert_eq!(body["usage"]["include"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn build_body_omits_provider_when_no_routing_is_set() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        // A request with no preference must not constrain routing at all.
+        assert!(body.get("provider").is_none());
+    }
+
+    #[test]
+    fn build_body_writes_the_client_wide_routing_default() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+        let routing = OpenRouterRouting::new().sort(crate::routing::ProviderSort::Price);
+        let body = OpenRouterProvider::build_body(&req, false, Some(&routing)).unwrap();
+        assert_eq!(body["provider"]["sort"], serde_json::json!("price"));
+    }
+
+    #[test]
+    fn an_empty_default_routing_is_not_sent() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+        let body =
+            OpenRouterProvider::build_body(&req, false, Some(&OpenRouterRouting::new())).unwrap();
+        // `provider: {}` is noise; omit it.
+        assert!(body.get("provider").is_none());
+    }
+
+    #[test]
+    fn per_request_routing_replaces_the_client_default() {
+        // Merging instead of replacing would let a client-wide `only` leak
+        // into a request that asked to route purely by price.
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+            .with_openrouter_routing(
+                OpenRouterRouting::new().sort(crate::routing::ProviderSort::Throughput),
+            );
+        let default = OpenRouterRouting::new().only(["azure"]);
+
+        let body = OpenRouterProvider::build_body(&req, false, Some(&default)).unwrap();
+        assert_eq!(body["provider"]["sort"], serde_json::json!("throughput"));
+        assert!(body["provider"].get("only").is_none());
+    }
+
+    #[test]
+    fn extra_fields_are_merged_into_the_body() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+            .with_extra("models", serde_json::json!(["a/b", "c/d"]))
+            .with_extra("user", serde_json::json!("acct-1"));
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+
+        assert_eq!(body["models"], serde_json::json!(["a/b", "c/d"]));
+        assert_eq!(body["user"], serde_json::json!("acct-1"));
+        // The fields the provider builds itself survive alongside them.
+        assert_eq!(body["model"], serde_json::json!("openai/gpt-4o"));
+        assert!(body["messages"].is_array());
+    }
+
+    #[test]
+    fn extra_can_override_a_field_the_provider_builds() {
+        let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+            .with_extra("usage", serde_json::json!({ "include": false }));
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        assert_eq!(body["usage"]["include"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn map_response_reads_the_serving_provider_from_metadata() {
+        let body = serde_json::json!({
+            "id": "gen-1",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "Hi" },
+                "finish_reason": "stop"
+            }],
+            "openrouter_metadata": {
+                "attempt": 2,
+                "endpoints": {
+                    "available": [
+                        { "provider": "Together", "model": "x/y", "selected": false },
+                        { "provider": "DeepInfra", "model": "x/y", "selected": true }
+                    ]
+                }
+            }
+        });
+        let route = OpenRouterProvider::map_response(body)
+            .unwrap()
+            .route
+            .unwrap();
+        assert_eq!(route.provider.as_deref(), Some("DeepInfra"));
+        assert_eq!(route.model.as_deref(), Some("x/y"));
+        // Two attempts means the first choice failed — the signal that a
+        // routing preference was not honoured.
+        assert_eq!(route.attempts, 2);
+    }
+
+    #[test]
+    fn map_response_leaves_route_unset_without_metadata() {
+        let body = serde_json::json!({
+            "id": "gen-1",
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "content": "Hi" },
+                "finish_reason": "stop"
+            }]
+        });
+        // Absent metadata is "not reported", not a parse failure.
+        assert_eq!(OpenRouterProvider::map_response(body).unwrap().route, None);
+    }
+
+    #[test]
+    fn builder_stores_routing_and_route_reporting() {
+        let p = provider(Some("sk-or-test"))
+            .with_routing(OpenRouterRouting::pinned_to("azure"))
+            .with_route_reporting(true);
+        assert_eq!(p.routing().unwrap().only, vec!["azure"]);
+        assert!(p.report_route);
     }
 
     #[test]

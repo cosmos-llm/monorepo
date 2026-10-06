@@ -111,6 +111,7 @@ pub mod config;
 pub mod error;
 pub mod opencode;
 pub mod providers;
+pub mod routing;
 pub mod sse;
 pub mod types;
 
@@ -118,7 +119,8 @@ pub use client::Client;
 pub use config::Config;
 pub use error::{CosmosError, SYSTEM};
 pub use providers::{resolve_with_base_url, CompletionStream};
+pub use routing::{DataCollection, MaxPrice, OpenRouterRouting, ProviderSort, SortPartition};
 pub use types::{
-    Choice, CompletionRequest, CompletionResponse, Message, StreamAccumulator, StreamChunk,
-    ToolCall, ToolCallDelta, Usage,
+    Choice, CompletionRequest, CompletionResponse, Message, RouteInfo, StreamAccumulator,
+    StreamChunk, ToolCall, ToolCallDelta, Usage,
 };

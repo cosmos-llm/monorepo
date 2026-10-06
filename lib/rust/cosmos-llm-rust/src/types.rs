@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+
+use crate::routing::OpenRouterRouting;
 use serde_json::Value;
 
 /// A single message in a conversation.
@@ -261,6 +263,34 @@ pub struct CompletionRequest {
     /// forced-tool object).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<Value>,
+    /// Extra top-level fields merged into the request body verbatim.
+    ///
+    /// The fields above are the ones every provider understands. This is the
+    /// escape hatch for the ones only *some* provider understands —
+    /// OpenRouter's `provider` routing block, its `transforms`, a preview
+    /// parameter that shipped ahead of a release here. Entries are written
+    /// into the JSON body as-is, and a key that collides with a field the
+    /// provider builds itself wins, which makes this an override as well as an
+    /// addition.
+    ///
+    /// Providers that build an OpenAI-shaped body honour this. Anthropic does
+    /// too. A provider that ignores an unknown field will silently drop
+    /// whatever is put here, so this is a sharp tool: prefer the typed
+    /// builders — [`CompletionRequest::with_openrouter_routing`] and friends —
+    /// where one exists.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message};
+    /// use serde_json::json;
+    ///
+    /// let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+    ///     .with_extra("transforms", json!(["middle-out"]));
+    /// assert_eq!(req.extra.get("transforms"), Some(&json!(["middle-out"])));
+    /// ```
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub extra: std::collections::BTreeMap<String, Value>,
 }
 
 impl CompletionRequest {
@@ -288,6 +318,7 @@ impl CompletionRequest {
             stop: None,
             tools: None,
             tool_choice: None,
+            extra: std::collections::BTreeMap::new(),
         }
     }
 
@@ -387,6 +418,72 @@ impl CompletionRequest {
     pub fn with_tool_choice(mut self, choice: Value) -> Self {
         self.tool_choice = Some(choice);
         self
+    }
+
+    /// Sets one extra top-level body field. See [`CompletionRequest::extra`].
+    ///
+    /// Calling this twice with the same key replaces the earlier value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message};
+    /// use serde_json::json;
+    ///
+    /// let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+    ///     .with_extra("user", json!("account-42"));
+    /// assert_eq!(req.extra["user"], json!("account-42"));
+    /// ```
+    pub fn with_extra(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.extra.insert(key.into(), value);
+        self
+    }
+
+    /// Attaches an OpenRouter provider-routing preference to this request.
+    ///
+    /// Serializes [`OpenRouterRouting`] into the `provider` body field, which
+    /// is how OpenRouter is told to pin, order, exclude, or sort the upstream
+    /// providers eligible to serve the call. Only the OpenRouter provider
+    /// reads it; sending a request carrying one to OpenAI or Anthropic is
+    /// harmless but does nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message, OpenRouterRouting};
+    ///
+    /// let req = CompletionRequest::new(
+    ///     "anthropic/claude-3.5-sonnet",
+    ///     vec![Message::user("hi")],
+    /// )
+    /// .with_openrouter_routing(OpenRouterRouting::new().only(["anthropic"]));
+    ///
+    /// assert_eq!(req.extra["provider"]["only"][0], "anthropic");
+    /// ```
+    pub fn with_openrouter_routing(self, routing: OpenRouterRouting) -> Self {
+        self.with_extra("provider", routing.to_value())
+    }
+
+    /// Returns the OpenRouter routing preference set on this request, if any.
+    ///
+    /// Reads back what [`CompletionRequest::with_openrouter_routing`] wrote.
+    /// Returns `None` when no routing was set, and when the `provider` key
+    /// holds something that is not a routing object (e.g. a raw value pushed
+    /// through [`CompletionRequest::with_extra`]).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message, OpenRouterRouting};
+    ///
+    /// let plain = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")]);
+    /// assert!(plain.openrouter_routing().is_none());
+    ///
+    /// let pinned = plain.with_openrouter_routing(OpenRouterRouting::new().only(["azure"]));
+    /// assert_eq!(pinned.openrouter_routing().unwrap().only, vec!["azure"]);
+    /// ```
+    pub fn openrouter_routing(&self) -> Option<OpenRouterRouting> {
+        OpenRouterRouting::from_value(self.extra.get("provider")?)
     }
 }
 
@@ -500,6 +597,93 @@ pub struct CompletionResponse {
     pub choices: Vec<Choice>,
     /// Token usage statistics, if provided.
     pub usage: Option<Usage>,
+    /// The upstream provider that actually served the request.
+    ///
+    /// Only OpenRouter reports this, and only when asked — see
+    /// [`OpenRouterProvider::with_route_reporting`](crate::providers::openrouter::OpenRouterProvider::with_route_reporting).
+    /// `None` everywhere else, and `None` on a cache hit even when reporting
+    /// is on, so treat it as "not stated" rather than "not routed".
+    ///
+    /// This is what makes a routing preference verifiable: without it, an
+    /// `order` that silently fell through to a fallback looks exactly like one
+    /// that was honoured.
+    #[serde(default)]
+    pub route: Option<RouteInfo>,
+}
+
+/// Which upstream provider served an OpenRouter request.
+///
+/// Decoded from the `openrouter_metadata` block OpenRouter attaches when
+/// reporting is enabled. The wire shape is explicitly additive, so unknown
+/// fields are ignored rather than treated as an error.
+///
+/// # Examples
+///
+/// ```
+/// use cosmos_llm::RouteInfo;
+///
+/// let info = RouteInfo {
+///     provider: Some("Anthropic".into()),
+///     model: Some("anthropic/claude-3.5-sonnet".into()),
+///     attempts: 1,
+/// };
+/// assert_eq!(info.provider.as_deref(), Some("Anthropic"));
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+pub struct RouteInfo {
+    /// Name of the upstream that served the request, e.g. `"Anthropic"`.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// The model the serving provider ran, which differs from the requested
+    /// one when a fallback in `models` was used.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// How many providers were tried before one succeeded.
+    ///
+    /// Greater than one means the preferred provider failed and routing moved
+    /// on, which is the signal that a preference was not honoured.
+    #[serde(default)]
+    pub attempts: u32,
+}
+
+impl RouteInfo {
+    /// Extracts route information from an `openrouter_metadata` block.
+    ///
+    /// Prefers the endpoint marked `selected`, falling back to the last
+    /// recorded attempt, since a cache hit or a partial block can carry one
+    /// without the other. Returns `None` when neither is present.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::RouteInfo;
+    /// use serde_json::json;
+    ///
+    /// let meta = json!({
+    ///     "attempt": 1,
+    ///     "endpoints": {
+    ///         "available": [
+    ///             {"provider": "OpenAI", "model": "openai/gpt-4o", "selected": true}
+    ///         ]
+    ///     }
+    /// });
+    /// let info = RouteInfo::from_metadata(&meta).unwrap();
+    /// assert_eq!(info.provider.as_deref(), Some("OpenAI"));
+    /// ```
+    pub fn from_metadata(meta: &Value) -> Option<Self> {
+        let attempts = meta["attempt"].as_u64().unwrap_or(0) as u32;
+
+        let selected = meta["endpoints"]["available"]
+            .as_array()
+            .and_then(|list| list.iter().find(|e| e["selected"].as_bool() == Some(true)))
+            .or_else(|| meta["attempts"].as_array().and_then(|list| list.last()))?;
+
+        Some(Self {
+            provider: selected["provider"].as_str().map(str::to_owned),
+            model: selected["model"].as_str().map(str::to_owned),
+            attempts,
+        })
+    }
 }
 
 impl CompletionResponse {
@@ -523,6 +707,7 @@ impl CompletionResponse {
     ///         tool_calls: vec![],
     ///     }],
     ///     usage: None,
+    ///     route: None,
     /// };
     /// assert_eq!(resp.content(), Some("Hello!"));
     /// ```
@@ -547,6 +732,7 @@ impl CompletionResponse {
     ///     model: None,
     ///     choices: vec![],
     ///     usage: None,
+    ///     route: None,
     /// };
     /// assert_eq!(resp.text(), "");
     /// ```
@@ -572,6 +758,7 @@ impl CompletionResponse {
     ///         tool_calls: vec![ToolCall { id: "1".into(), name: "echo".into(), input: json!({}) }],
     ///     }],
     ///     usage: None,
+    ///     route: None,
     /// };
     /// assert!(resp.tool_use());
     /// ```
@@ -592,6 +779,7 @@ impl CompletionResponse {
     ///     model: None,
     ///     choices: vec![],
     ///     usage: None,
+    ///     route: None,
     /// };
     /// assert!(resp.tool_calls().is_empty());
     /// ```
@@ -630,6 +818,7 @@ impl CompletionResponse {
     ///         }],
     ///     }],
     ///     usage: None,
+    ///     route: None,
     /// };
     ///
     /// let msg = resp.to_assistant_message();
@@ -930,6 +1119,7 @@ impl StreamAccumulator {
                 tool_calls,
             }],
             usage: self.usage,
+            route: None,
         }
     }
 }
@@ -1020,6 +1210,7 @@ mod tests {
                 }],
             }],
             usage: None,
+            route: None,
         };
 
         let msg = resp.to_assistant_message();
@@ -1058,6 +1249,7 @@ mod tests {
                 tool_calls: vec![],
             }],
             usage: None,
+            route: None,
         };
         assert_eq!(resp.content(), Some("hello"));
         assert_eq!(resp.text(), "hello");
@@ -1081,6 +1273,7 @@ mod tests {
                 }],
             }],
             usage: None,
+            route: None,
         };
         assert!(resp.tool_use());
         assert_eq!(resp.tool_calls().len(), 1);
@@ -1094,6 +1287,7 @@ mod tests {
             model: None,
             choices: vec![],
             usage: None,
+            route: None,
         };
         assert_eq!(resp.content(), None);
     }

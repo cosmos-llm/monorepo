@@ -328,3 +328,81 @@ fn anthropic_stream_body_decodes_every_event() {
         assert!(events[2].contains("\"text\":\"Hi\""));
     }
 }
+
+// ── OpenRouter provider routing ───────────────────────────────────────────────
+
+/// A routing preference is worth nothing if it does not survive the trip to
+/// the wire, so these assert against the body the server actually receives.
+#[tokio::test]
+async fn openrouter_sends_the_routing_block_on_the_wire() {
+    use cosmos_llm::{CompletionRequest, Message, OpenRouterRouting, ProviderSort};
+
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .match_body(mockito::Matcher::PartialJson(serde_json::json!({
+            "provider": {
+                "order": ["azure", "openai"],
+                "allow_fallbacks": false,
+                "sort": "price"
+            }
+        })))
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"id":"gen-1","choices":[{"index":0,
+                "message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}"#,
+        )
+        .create_async()
+        .await;
+
+    let client = Client::new_with_base_url("openrouter", "sk-or-test", server.url()).unwrap();
+    let req = CompletionRequest::new("openai/gpt-4o", vec![Message::user("hi")])
+        .with_openrouter_routing(
+            OpenRouterRouting::new()
+                .order(["azure", "openai"])
+                .allow_fallbacks(false)
+                .sort(ProviderSort::Price),
+        );
+
+    let resp = client.completion(req).await.unwrap();
+
+    mock.assert_async().await;
+    assert_eq!(resp.content(), Some("ok"));
+}
+
+#[tokio::test]
+async fn openrouter_route_reporting_sets_the_header_and_reads_the_result() {
+    use cosmos_llm::providers::openrouter::OpenRouterProvider;
+
+    let mut server = mockito::Server::new_async().await;
+    let mock = server
+        .mock("POST", "/chat/completions")
+        .match_header("x-openrouter-metadata", "enabled")
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(
+            r#"{"id":"gen-1","choices":[{"index":0,
+                "message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],
+                "openrouter_metadata":{"attempt":1,"endpoints":{"available":[
+                  {"provider":"Anthropic","model":"anthropic/claude-3.5-sonnet","selected":true}]}}}"#,
+        )
+        .create_async()
+        .await;
+
+    let provider = OpenRouterProvider::new(Some("sk-or-test".into()))
+        .with_base_url(server.url())
+        .with_route_reporting(true);
+    let client = Client::from_provider(Box::new(provider));
+
+    let req = cosmos_llm::CompletionRequest::new(
+        "anthropic/claude-3.5-sonnet",
+        vec![cosmos_llm::Message::user("hi")],
+    );
+    let resp = client.completion(req).await.unwrap();
+
+    mock.assert_async().await;
+    let route = resp.route.unwrap();
+    assert_eq!(route.provider.as_deref(), Some("Anthropic"));
+    assert_eq!(route.attempts, 1);
+}
