@@ -1,0 +1,36 @@
+[
+  {
+    "event": "pre_tool_use",
+    "session_id": "s-1",
+    "cwd": "/work",
+    "tool": "write",
+    "input": {
+      "content": "fn main() {}",
+      "file_path": "a.rs"
+    }
+  },
+  {
+    "event": "post_tool_use",
+    "session_id": "s-1",
+    "cwd": "/work",
+    "tool": "write",
+    "input": {
+      "content": "fn main() {}",
+      "file_path": "a.rs"
+    },
+    "result": "wrote 1 line"
+  },
+  {
+    "event": "stop",
+    "session_id": "s-1",
+    "cwd": "/work",
+    "assistant_message": "All done.",
+    "stop_hook_active": true
+  },
+  {
+    "event": "user_prompt_submit",
+    "session_id": "",
+    "cwd": "",
+    "prompt": "fix the bug"
+  }
+]

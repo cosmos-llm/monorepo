@@ -107,36 +107,75 @@
 //!     StopReason::Finished => println!("{}", outcome.text),
 //!     StopReason::Steps => eprintln!("hit the step cap"),
 //!     StopReason::Budget => eprintln!("hit the token ceiling"),
+//!     _ => eprintln!("interrupted or aborted"),
 //! }
 //! # }
 //! # }
 //! ```
+//!
+//! ## Events, threads, approvals, interrupts
+//!
+//! The loop streams the model and reports through owned, serializable
+//! [`AgentEvent`]s on a bounded `tokio::sync::mpsc` channel. A [`Thread`]
+//! keeps the history across runs and queues input typed mid-run; an
+//! [`Approver`] gates each call before it executes; a
+//! `cosmos_llm::CancellationToken` stops a turn and leaves a history every
+//! provider accepts. Tools are described by the data-only [`ToolSpec`], and
+//! executed through a [`ToolDefinition`] (a spec plus handler).
 //!
 //! The loop is provider-neutral: it speaks the normalized
 //! `cosmos_llm::ToolCall`, so the same code runs against OpenAI and Anthropic
 //! without a dialect switch. [`Session`] and [`Progress`] need no client and
 //! are available without the feature.
 
+#[cfg(feature = "async")]
+pub mod context;
 pub mod definition;
 pub mod error;
 pub mod executor;
+pub mod fs;
+pub mod output_limit;
 pub mod parameter;
 pub mod preset;
 pub mod progress;
 pub mod registry;
 pub mod schemas;
 pub mod session;
+pub mod spec;
+#[cfg(feature = "trongo")]
+pub mod trongo;
 
 #[cfg(feature = "agent")]
 pub mod agent;
+#[cfg(feature = "agent")]
+pub mod approval;
+#[cfg(feature = "agent")]
+pub mod events;
+#[cfg(feature = "agent")]
+pub mod thread;
 
+#[cfg(feature = "async")]
+pub use context::{ProgressSink, ToolContext};
 pub use definition::{Handler, ToolDefinition};
 pub use error::ToolError;
 pub use executor::Executor;
+pub use output_limit::{limit_output, LimitedOutput, OutputLimit, SpillStore, Truncate};
 pub use parameter::ParameterType;
 pub use progress::Progress;
 pub use registry::Registry;
 pub use session::Session;
+pub use spec::{ToolHints, ToolSpec};
 
 #[cfg(feature = "agent")]
-pub use agent::{AgentLoop, LoopEvent, RunOutcome, StopReason, TokenUsage};
+pub use agent::{
+    event_channel, AgentLoop, Completer, LoopEvent, RunHandles, RunOutcome, StopReason, TokenUsage,
+};
+#[cfg(feature = "agent")]
+pub use approval::{AllowAll, ApprovalRequest, ApprovalScope, Approver, Decision, FnApprover};
+#[cfg(feature = "agent")]
+pub use events::{AgentEvent, ToolOutcome, TurnStop};
+#[cfg(feature = "agent")]
+pub use thread::{
+    validate_history, HistoryError, InputQueue, StatusCell, Thread, ThreadId, ThreadStatus,
+    UserInput,
+};

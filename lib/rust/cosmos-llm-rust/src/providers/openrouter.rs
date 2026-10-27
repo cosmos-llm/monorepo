@@ -6,13 +6,17 @@ use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
 use crate::error::CosmosError;
-use crate::providers::openai::parse_openai_chunk;
+use crate::model::ModelInfo;
+use crate::providers::openai::{
+    choices_from_body, parse_openai_chunk, usage_from_openai, OpenAiProvider, WireOptions,
+};
 use crate::providers::{
     map_openai_error, retry_after_from_headers, stream_from_response, transport_error,
     CompletionStream, Provider,
 };
+use crate::reasoning::Reasoning;
 use crate::routing::OpenRouterRouting;
-use crate::types::{Choice, CompletionRequest, CompletionResponse, Message, ToolCall, Usage};
+use crate::types::{CompletionRequest, CompletionResponse};
 
 /// Default API root, used unless overridden by
 /// [`OpenRouterProvider::with_base_url`] or the `OPENROUTER_BASE_URL`
@@ -26,7 +30,7 @@ const PROVIDER_NAME: &str = "openrouter";
 ///
 /// OpenRouter proxies many upstream models behind an OpenAI-compatible
 /// interface, so request and response shapes match
-/// [`OpenAiProvider`](crate::providers::openai::OpenAiProvider). Model
+/// [`OpenAiProvider`]. Model
 /// identifiers are namespaced by vendor, e.g. `"anthropic/claude-3.5-sonnet"`
 /// or `"openai/gpt-4o"`.
 ///
@@ -279,11 +283,15 @@ impl OpenRouterProvider {
         stream: bool,
         default_routing: Option<&OpenRouterRouting>,
     ) -> Result<Value, CosmosError> {
-        let messages = req
-            .messages
-            .iter()
-            .map(crate::providers::openai::OpenAiProvider::message_to_wire)
-            .collect::<Result<Vec<_>, _>>()?;
+        // OpenRouter forwards `cache_control` to Anthropic models and
+        // `reasoning_details` to the models that issue them.
+        let messages = OpenAiProvider::messages_to_wire(
+            &req.messages,
+            WireOptions {
+                cache_parts: true,
+                reasoning_details: true,
+            },
+        )?;
 
         let mut body = json!({
             "model": req.model,
@@ -317,6 +325,15 @@ impl OpenRouterProvider {
             body["stream"] = json!(true);
             body["stream_options"] = json!({ "include_usage": true });
         }
+        match req.reasoning {
+            Some(Reasoning::Budget { tokens }) => {
+                body["reasoning"] = json!({ "max_tokens": tokens });
+            }
+            Some(Reasoning::Effort { effort }) => {
+                body["reasoning"] = json!({ "effort": effort.as_str() });
+            }
+            _ => {}
+        }
 
         // The client-wide routing default. Written before `extra` so that a
         // request carrying its own `provider` block replaces it.
@@ -338,62 +355,11 @@ impl OpenRouterProvider {
         let id = body["id"].as_str().map(str::to_owned);
         let model = body["model"].as_str().map(str::to_owned);
 
-        let choices = body["choices"]
-            .as_array()
-            .ok_or_else(|| CosmosError::InvalidResponse {
-                provider: PROVIDER_NAME.to_owned(),
-                message: "missing 'choices' field".to_owned(),
-            })?
-            .iter()
-            .map(|c| {
-                let role = c["message"]["role"]
-                    .as_str()
-                    .unwrap_or("assistant")
-                    .to_owned();
-                let content = c["message"]["content"].as_str().unwrap_or("").to_owned();
-                let finish_reason = c["finish_reason"].as_str().map(str::to_owned);
-                let index = c["index"].as_u64().unwrap_or(0) as u32;
-                let tool_calls = c["message"]["tool_calls"]
-                    .as_array()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|tc| {
-                                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-                                ToolCall {
-                                    id: tc["id"].as_str().unwrap_or_default().to_owned(),
-                                    name: tc["function"]["name"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    input: serde_json::from_str(args_str).unwrap_or(Value::Null),
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Choice {
-                    index,
-                    message: Message::new(role, content),
-                    finish_reason,
-                    tool_calls,
-                }
-            })
-            .collect();
+        let choices = choices_from_body(PROVIDER_NAME, &body)?;
 
-        let usage = if body["usage"].is_object() {
-            Some(Usage {
-                prompt_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: body["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
-                // The dollar figure the account was actually charged, present
-                // only when the request asked for it (see `body`). Absent is
-                // not zero: a request sent without the flag was still billed.
-                cost: body["usage"]["cost"].as_f64(),
-            })
-        } else {
-            None
-        };
+        let usage = body["usage"]
+            .is_object()
+            .then(|| usage_from_openai(&body["usage"]));
 
         Ok(CompletionResponse {
             id,
@@ -500,37 +466,60 @@ impl Provider for OpenRouterProvider {
         &'a self,
     ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, CosmosError>> + Send + 'a>> {
         Box::pin(async move {
-            // OpenRouter's model catalogue is public; the key is sent when
-            // available so per-account model visibility is respected.
-            let mut request = self.http.get(format!("{}/models", self.base_url));
-            if let Some(key) = self.api_key.as_deref() {
-                request = self.authorize(request, key);
-            }
-
-            let resp = request.send().await.map_err(Self::network_error)?;
-
-            let status = resp.status().as_u16();
-            let retry_after = retry_after_from_headers(resp.headers());
-            let json: Value = resp.json().await.map_err(Self::network_error)?;
-
-            if (200..300).contains(&status) {
-                let ids = json["data"]
-                    .as_array()
-                    .unwrap_or(&vec![])
-                    .iter()
-                    .filter_map(|m| m["id"].as_str().map(str::to_owned))
-                    .collect();
-                Ok(ids)
-            } else {
-                Err(Self::handle_error(status, &json, retry_after))
-            }
+            let entries = self.fetch_models().await?;
+            Ok(entries
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(str::to_owned))
+                .collect())
         })
+    }
+
+    fn lists_model_details(&self) -> bool {
+        true
+    }
+
+    fn models_info<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<ModelInfo>, CosmosError>> + Send + 'a>> {
+        Box::pin(async move {
+            let entries = self.fetch_models().await?;
+            Ok(entries
+                .iter()
+                .filter_map(ModelInfo::from_openrouter)
+                .collect())
+        })
+    }
+}
+
+impl OpenRouterProvider {
+    /// Fetches the `/models` catalogue.
+    ///
+    /// The catalogue is public; the key is sent when available so per-account
+    /// model visibility is respected.
+    async fn fetch_models(&self) -> Result<Vec<Value>, CosmosError> {
+        let mut request = self.http.get(format!("{}/models", self.base_url));
+        if let Some(key) = self.api_key.as_deref() {
+            request = self.authorize(request, key);
+        }
+
+        let resp = request.send().await.map_err(Self::network_error)?;
+
+        let status = resp.status().as_u16();
+        let retry_after = retry_after_from_headers(resp.headers());
+        let json: Value = resp.json().await.map_err(Self::network_error)?;
+
+        if (200..300).contains(&status) {
+            Ok(json["data"].as_array().cloned().unwrap_or_default())
+        } else {
+            Err(Self::handle_error(status, &json, retry_after))
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Message;
 
     /// Builds a provider with no environment fallback, so tests do not depend
     /// on the developer's shell.
@@ -625,7 +614,7 @@ mod tests {
             }
         });
         let resp = OpenRouterProvider::map_response(body).unwrap();
-        assert_eq!(resp.content(), Some("Hello!"));
+        assert_eq!(resp.content().as_deref(), Some("Hello!"));
         assert_eq!(resp.model.as_deref(), Some("anthropic/claude-3.5-sonnet"));
         assert!(!resp.tool_use());
         let usage = resp.usage.unwrap();
@@ -861,5 +850,125 @@ mod tests {
         let err = OpenRouterProvider::handle_error(429, &body, Some(Duration::from_secs(7)));
         assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
         assert!(err.is_retryable());
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::content::{CacheHint, ContentBlock};
+    use crate::reasoning::{Reasoning, ReasoningEffort};
+    use crate::types::Message;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_maps_to_the_reasoning_object() {
+        let req = CompletionRequest::new("anthropic/claude-sonnet-4", vec![Message::user("hi")])
+            .with_reasoning(Reasoning::effort(ReasoningEffort::Low));
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        assert_eq!(body["reasoning"], json!({"effort": "low"}));
+
+        let req = CompletionRequest::new("m", vec![Message::user("hi")])
+            .with_reasoning(Reasoning::budget(3000));
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        assert_eq!(body["reasoning"], json!({"max_tokens": 3000}));
+    }
+
+    #[test]
+    fn reasoning_and_details_become_replayable_blocks() {
+        let resp = OpenRouterProvider::map_response(json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "answer",
+                    "reasoning": "plain",
+                    "reasoning_details": [
+                        { "type": "reasoning.text", "text": "plan", "signature": "sg" },
+                        { "type": "reasoning.encrypted", "data": "blob" }
+                    ]
+                },
+                "finish_reason": "stop"
+            }]
+        }))
+        .unwrap();
+        let msg = resp.to_assistant_message();
+        assert_eq!(
+            msg.content,
+            vec![
+                ContentBlock::Thinking {
+                    text: "plan".into(),
+                    signature: Some("sg".into())
+                },
+                ContentBlock::RedactedThinking {
+                    data: "blob".into()
+                },
+                ContentBlock::text("answer"),
+            ]
+        );
+
+        let req = CompletionRequest::new("m", vec![Message::user("q"), msg]);
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        assert_eq!(
+            body["messages"][1]["reasoning_details"],
+            json!([
+                { "type": "reasoning.text", "text": "plan", "signature": "sg" },
+                { "type": "reasoning.encrypted", "data": "blob" }
+            ])
+        );
+    }
+
+    #[test]
+    fn cache_hints_are_forwarded_as_content_parts() {
+        let req = CompletionRequest::new(
+            "anthropic/claude-sonnet-4",
+            vec![Message::system("long prompt").with_cache(CacheHint::Ephemeral)],
+        );
+        let body = OpenRouterProvider::build_body(&req, false, None).unwrap();
+        assert_eq!(
+            body["messages"][0]["content"],
+            json!([{"type": "text", "text": "long prompt", "cache_control": {"type": "ephemeral"}}])
+        );
+    }
+
+    #[test]
+    fn usage_reports_cache_and_reasoning_counts_and_cost() {
+        let resp = OpenRouterProvider::map_response(json!({
+            "choices": [{ "message": { "role": "assistant", "content": "x" } }],
+            "usage": {
+                "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15, "cost": 0.5,
+                "prompt_tokens_details": { "cached_tokens": 4, "cache_write_tokens": 2 },
+                "completion_tokens_details": { "reasoning_tokens": 3 }
+            }
+        }))
+        .unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.cache_read_tokens, Some(4));
+        assert_eq!(usage.cache_write_tokens, Some(2));
+        assert_eq!(usage.reasoning_tokens, Some(3));
+        assert_eq!(usage.cost, Some(0.5));
+    }
+
+    #[test]
+    fn the_models_listing_becomes_model_info() {
+        let entry = json!({
+            "id": "anthropic/claude-sonnet-4",
+            "context_length": 200000,
+            "architecture": { "input_modalities": ["text", "image"] },
+            "top_provider": { "max_completion_tokens": 64000 },
+            "pricing": {
+                "prompt": "0.000003", "completion": "0.000015",
+                "input_cache_read": "0.0000003", "input_cache_write": "0.00000375"
+            },
+            "supported_parameters": ["tools", "reasoning", "temperature"]
+        });
+        let info = ModelInfo::from_openrouter(&entry).unwrap();
+        assert_eq!(info.context_window, Some(200_000));
+        assert_eq!(info.max_output_tokens, Some(64_000));
+        assert!(info.supports_tools && info.supports_images && info.supports_reasoning);
+        assert!(info.supports_prompt_cache);
+        let p = info.pricing.unwrap();
+        assert!((p.input - 3.0).abs() < 1e-9);
+        assert!((p.output - 15.0).abs() < 1e-9);
+        assert!((p.cache_write.unwrap() - 3.75).abs() < 1e-9);
     }
 }

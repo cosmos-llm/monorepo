@@ -1,0 +1,70 @@
+;; Built-in model table. `build.rs` evaluates this into JSON at build time, so
+;; the library reads plain data and needs no evaluator at runtime.
+;;
+;; Limits and prices are per provider documentation at the time of writing and
+;; drift: treat them as a starting point and override with
+;; `Client::with_model_info` where it matters. Prices are US dollars per
+;; million tokens. A model with no :pricing has none we are confident of.
+;;
+;; Ids match by longest prefix at a `-` boundary, so "claude-sonnet-4-6" also
+;; covers "claude-sonnet-4-6-20260101". The bare `claude-opus`, `claude-sonnet`
+;; and `claude-haiku` rows are family fallbacks for ids not listed.
+
+(defn price [input output cache-read cache-write]
+  {:input input :output output :cache_read cache-read :cache_write cache-write})
+
+(defn claude [id max-out extra]
+  (merge {:id id
+          :provider "anthropic"
+          :context_window 200000
+          :max_output_tokens max-out
+          :supports_tools true
+          :supports_images true
+          :supports_reasoning true
+          :supports_prompt_cache true}
+         extra))
+
+(defn gpt [id window max-out extra]
+  (merge {:id id
+          :provider "openai"
+          :context_window window
+          :max_output_tokens max-out
+          :supports_tools true
+          :supports_images true
+          :supports_reasoning false
+          :supports_prompt_cache true}
+         extra))
+
+[;; Anthropic
+ (claude "claude-opus" 32000 {})
+ (claude "claude-sonnet" 64000 {})
+ (claude "claude-haiku" 64000 {})
+ (claude "claude-sonnet-4" 64000 {:pricing (price 3.0 15.0 0.3 3.75)})
+ (claude "claude-haiku-4-5" 64000 {:pricing (price 1.0 5.0 0.1 1.25)})
+ (claude "claude-3-7-sonnet" 64000 {:pricing (price 3.0 15.0 0.3 3.75)})
+ (claude "claude-3-5-sonnet" 8192 {:supports_reasoning false
+                                   :pricing (price 3.0 15.0 0.3 3.75)})
+ (claude "claude-3-5-haiku" 8192 {:supports_reasoning false :supports_images false
+                                  :pricing (price 0.8 4.0 0.08 1.0)})
+ (claude "claude-3-opus" 4096 {:supports_reasoning false
+                               :pricing (price 15.0 75.0 1.5 18.75)})
+ (claude "claude-3-haiku" 4096 {:supports_reasoning false
+                                :pricing (price 0.25 1.25 0.03 0.3)})
+
+ ;; OpenAI
+ (gpt "gpt-4o" 128000 16384 {:pricing (price 2.5 10.0 1.25 nil)})
+ (gpt "gpt-4o-mini" 128000 16384 {:pricing (price 0.15 0.6 0.075 nil)})
+ (gpt "gpt-4-turbo" 128000 4096 {:supports_prompt_cache false
+                                 :pricing (price 10.0 30.0 nil nil)})
+ (gpt "gpt-3.5-turbo" 16385 4096 {:supports_images false :supports_prompt_cache false
+                                  :pricing (price 0.5 1.5 nil nil)})
+ (gpt "gpt-4.1" 1047576 32768 {:pricing (price 2.0 8.0 0.5 nil)})
+ (gpt "gpt-4.1-mini" 1047576 32768 {:pricing (price 0.4 1.6 0.1 nil)})
+ (gpt "gpt-5" 400000 128000 {:supports_reasoning true
+                             :pricing (price 1.25 10.0 0.125 nil)})
+ (gpt "o1" 200000 100000 {:supports_reasoning true :pricing (price 15.0 60.0 7.5 nil)})
+ (gpt "o3" 200000 100000 {:supports_reasoning true :pricing (price 2.0 8.0 0.5 nil)})
+ (gpt "o3-mini" 200000 100000 {:supports_reasoning true :supports_images false
+                               :pricing (price 1.1 4.4 0.55 nil)})
+ (gpt "o4-mini" 200000 100000 {:supports_reasoning true
+                               :pricing (price 1.1 4.4 0.275 nil)})]

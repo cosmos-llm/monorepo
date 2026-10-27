@@ -1,0 +1,11 @@
+{
+  "model": "claude-sonnet-4-6",
+  "messages": [
+    {"role": "system", "content": [{"type": "text", "text": "Be brief."}], "cache": "ephemeral_long"},
+    {"role": "user", "content": [{"type": "text", "text": "hi"}]}
+  ],
+  "max_tokens": 4096,
+  "tools": [{"name": "read", "input_schema": {"type": "object"}}],
+  "reasoning": {"type": "budget", "tokens": 2048},
+  "cache_tools": "ephemeral"
+}

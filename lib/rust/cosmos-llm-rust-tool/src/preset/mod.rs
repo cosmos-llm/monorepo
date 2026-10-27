@@ -6,6 +6,7 @@
 //!
 //! [`Filesystem`]: cosmos_llm_virtual_filesystem::Filesystem
 
+mod fs;
 mod glob;
 mod grep;
 mod list;
@@ -15,6 +16,7 @@ mod write;
 #[cfg(feature = "webfetch")]
 mod webfetch;
 
+pub use fs::{glob_tool_fs, grep_tool_fs, list_tool_fs, read_tool_fs, render_read, write_tool_fs};
 pub use glob::glob_tool;
 pub use grep::grep_tool;
 pub use list::list_tool;

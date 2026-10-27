@@ -1,0 +1,153 @@
+[
+  {
+    "event": "session_configured",
+    "protocol": 1,
+    "session_id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+    "model": "claude-sonnet-4",
+    "cwd": "/work/repo",
+    "mode": "ask",
+    "context_window": 200000,
+    "log_path": "/data/sessions/abc/s.jsonl"
+  },
+  {
+    "event": "history_loaded",
+    "items": [
+      {
+        "type": "message",
+        "id": 1,
+        "message": {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "hi"
+            }
+          ]
+        },
+        "in_context": true
+      }
+    ]
+  },
+  {
+    "event": "agent",
+    "type": "text_delta",
+    "text": "Hello"
+  },
+  {
+    "event": "agent",
+    "type": "tool_finished",
+    "call_id": "call_1",
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "ok"
+        }
+      ],
+      "is_error": false,
+      "display": {
+        "lines": 3
+      }
+    }
+  },
+  {
+    "event": "agent",
+    "type": "turn_finished",
+    "turn": 1,
+    "stop": {
+      "type": "end_turn"
+    }
+  },
+  {
+    "event": "approval_requested",
+    "call_id": "call_2",
+    "tool": "edit",
+    "input": {
+      "file_path": "src/lib.rs"
+    },
+    "preview": {
+      "diff": "@@ -1 +1 @@"
+    },
+    "hints": {
+      "read_only": false,
+      "destructive": true,
+      "paths": [
+        "src/lib.rs"
+      ]
+    }
+  },
+  {
+    "event": "context_usage",
+    "used": 1280,
+    "window": 200000,
+    "pressure": "ok"
+  },
+  {
+    "event": "compaction_started",
+    "reason": "threshold"
+  },
+  {
+    "event": "compaction_finished",
+    "before": 160000,
+    "after": 12000
+  },
+  {
+    "event": "turn_diff",
+    "files": [
+      {
+        "path": "logo.png",
+        "kind": "created",
+        "added": 0,
+        "removed": 0,
+        "binary": true,
+        "hunks": []
+      }
+    ]
+  },
+  {
+    "event": "undone",
+    "turn": 2,
+    "reverted": [
+      "a.rs"
+    ],
+    "skipped": [
+      "b.rs"
+    ]
+  },
+  {
+    "event": "model_changed",
+    "model": "gpt-5"
+  },
+  {
+    "event": "mode_changed",
+    "mode": "full_auto"
+  },
+  {
+    "event": "run_finished",
+    "reason": {
+      "type": "finished"
+    },
+    "steps": 3,
+    "usage": {
+      "prompt_tokens": 1200,
+      "completion_tokens": 80,
+      "total_tokens": 1280,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "steps": 1
+    }
+  },
+  {
+    "event": "warning",
+    "message": "careful"
+  },
+  {
+    "event": "error",
+    "message": "boom",
+    "fatal": false
+  },
+  {
+    "event": "shutdown_complete"
+  }
+]

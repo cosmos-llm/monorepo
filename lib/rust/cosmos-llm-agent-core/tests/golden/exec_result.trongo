@@ -1,0 +1,29 @@
+[
+  {
+    :cost 0.0125
+    :result "all tests pass"
+    :session_id "0b9a3c9e-0000-4000-8000-000000000001"
+    :stop_reason "finished"
+    :turns 4
+    :usage {:cache_read_tokens 0 :cache_write_tokens 0 :completion_tokens 300 :prompt_tokens 1200 :reasoning_tokens 0 :steps 4 :total_tokens 1500}
+    :v 1
+  }
+  {
+    :denied ["write {\"file_path\":\"a.txt\"}"]
+    :error "provider unavailable"
+    :result ""
+    :session_id "0b9a3c9e-0000-4000-8000-000000000002"
+    :stop_reason "error"
+    :turns 0
+    :usage {:cache_read_tokens 0 :cache_write_tokens 0 :completion_tokens 0 :prompt_tokens 0 :reasoning_tokens 0 :steps 0 :total_tokens 0}
+    :v 1
+  }
+  {
+    :result ""
+    :session_id ""
+    :stop_reason "max_turns"
+    :turns 0
+    :usage {:cache_read_tokens 0 :cache_write_tokens 0 :completion_tokens 0 :prompt_tokens 0 :reasoning_tokens 0 :steps 0 :total_tokens 0}
+    :v 1
+  }
+]

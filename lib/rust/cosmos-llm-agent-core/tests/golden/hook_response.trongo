@@ -1,0 +1,9 @@
+[
+  {}
+  {:decision "block" :reason "migrations/ is read-only"}
+  {:additional_context "formatted 2 files"}
+  {
+    :decision "allow"
+    :updated_input {:command "ls"}
+  }
+]

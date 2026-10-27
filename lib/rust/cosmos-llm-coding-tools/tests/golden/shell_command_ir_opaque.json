@@ -1,0 +1,18 @@
+{
+  "type": "sequence",
+  "items": [
+    {
+      "type": "simple",
+      "argv": [
+        {
+          "text": "ls"
+        }
+      ]
+    },
+    {
+      "type": "opaque",
+      "reason": "`if` compound command",
+      "source": "if true; then rm x; fi"
+    }
+  ]
+}

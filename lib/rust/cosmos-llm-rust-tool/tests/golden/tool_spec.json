@@ -1,0 +1,34 @@
+{
+  "name": "read",
+  "description": "Read a file",
+  "parameters": [
+    {
+      "name": "path",
+      "param_type": "string",
+      "description": "File path",
+      "required": true,
+      "enum_values": null,
+      "default": null
+    },
+    {
+      "name": "limit",
+      "param_type": "integer",
+      "description": "Max lines",
+      "required": false,
+      "enum_values": null,
+      "default": 200
+    }
+  ],
+  "hints": {
+    "read_only": true,
+    "destructive": false
+  },
+  "timeout_ms": 5000,
+  "output_limit": {
+    "max_bytes": 30000,
+    "max_lines": 500,
+    "strategy": {
+      "type": "head"
+    }
+  }
+}

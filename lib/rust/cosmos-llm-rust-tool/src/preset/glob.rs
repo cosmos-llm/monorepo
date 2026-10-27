@@ -70,7 +70,7 @@ pub fn glob_tool(filesystem: Arc<Filesystem>) -> ToolDefinition {
         })
 }
 
-fn glob_to_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
+pub(crate) fn glob_to_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
     let mut out = String::from("^");
     let mut chars = pat.chars().peekable();
     while let Some(c) = chars.next() {
@@ -87,16 +87,13 @@ fn glob_to_regex(pat: &str) -> Result<regex::Regex, regex::Error> {
             '{' => {
                 // {a,b,c} → (a|b|c)
                 let mut group = String::from("(");
-                let mut first = true;
                 for gc in chars.by_ref() {
                     if gc == '}' {
                         break;
                     }
                     if gc == ',' {
                         group.push('|');
-                        first = false;
                     } else {
-                        if !first {}
                         group.push(gc);
                     }
                 }

@@ -12,12 +12,12 @@ keywords = ["llm", "ai", "tool", "function-calling", "agent"]
 categories = ["api-bindings"]
 
 [features]
-default = ["async"]
+default = ["async", "trongo"]
 # Async handlers, `Executor::execute_async`, per-tool timeouts, and
 # `Executor::execute_all`. On by default because most real tools are I/O-bound,
 # but separable: a consumer with only synchronous tools should not have to pull
 # in `futures` or a runtime.
-async = ["dep:futures-util", "dep:tokio"]
+async = ["dep:futures-util", "dep:tokio", "dep:tokio-util"]
 # The `webfetch` preset. Implies `async` — it is an HTTP tool.
 webfetch = ["async", "dep:reqwest"]
 # `AgentLoop`, which drives a model through a toolset. Implies `async` and
@@ -25,6 +25,9 @@ webfetch = ["async", "dep:reqwest"]
 # rendering their schemas needs neither, and a consumer that hands its schemas
 # to some other client should not have to compile an HTTP stack for it.
 agent = ["async", "dep:cosmos-llm"]
+# `from_trongo`/`to_trongo` for the serde IRs (OutputLimit, ...). The IR types
+# themselves never depend on it.
+trongo = ["dep:trongoscript"]
 
 [dependencies]
 thiserror = "2"
@@ -35,7 +38,9 @@ cosmos-llm-virtual-filesystem = { path = "../cosmos-llm-rust-virtual-filesystem"
 cosmos-llm = { path = "../cosmos-llm-rust", optional = true }
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false, optional = true }
 futures-util = { version = "0.3", optional = true }
-tokio = { version = "1", features = ["rt", "time"], optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros"], optional = true }
+tokio-util = { version = "0.7", default-features = false, optional = true }
+trongoscript = { version = "0.1", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }

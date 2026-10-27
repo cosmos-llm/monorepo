@@ -1,0 +1,19 @@
+[
+  {
+    :cwd "/work"
+    :event "pre_tool_use"
+    :input {:content "fn main() {}" :file_path "a.rs"}
+    :session_id "s-1"
+    :tool "write"
+  }
+  {
+    :cwd "/work"
+    :event "post_tool_use"
+    :input {:content "fn main() {}" :file_path "a.rs"}
+    :result "wrote 1 line"
+    :session_id "s-1"
+    :tool "write"
+  }
+  {:assistant_message "All done." :cwd "/work" :event "stop" :session_id "s-1" :stop_hook_active true}
+  {:cwd "" :event "user_prompt_submit" :prompt "fix the bug" :session_id ""}
+]

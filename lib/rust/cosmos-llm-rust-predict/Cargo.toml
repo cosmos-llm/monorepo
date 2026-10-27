@@ -1,0 +1,49 @@
+[package]
+name = "cosmos-llm-predict"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Signature-driven LLM calls: predict, chain-of-thought, and best-of-N"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-predict"
+readme = "README.md"
+keywords = ["llm", "ai", "prompt", "predict", "agent"]
+categories = ["api-bindings"]
+
+[features]
+default = ["client"]
+# `LanguageModel` for `cosmos_llm::Client`, and the `cosmos` backend that
+# builds one by provider name. On by default because calling a model is the
+# point of this crate; turn it off to supply your own `LanguageModel` without
+# compiling an HTTP stack.
+client = ["dep:cosmos-llm"]
+# The `cosmos-llm-predict` binary and the `cli` module behind it. Implies
+# `client`, since a command line with no way to reach a model is not useful.
+# Install with `cargo install --features cli`.
+cli = ["client", "dep:clap", "dep:tokio"]
+
+[dependencies]
+cosmos-llm-registry = { path = "../cosmos-llm-rust-registry" }
+cosmos-llm-signature = { path = "../cosmos-llm-rust-signature", default-features = false }
+cosmos-llm-example = { path = "../cosmos-llm-rust-example", default-features = false }
+cosmos-llm-adapter = { path = "../cosmos-llm-rust-adapter", default-features = false }
+cosmos-llm-cache = { path = "../cosmos-llm-rust-cache", default-features = false }
+cosmos-llm = { path = "../cosmos-llm-rust", default-features = false, optional = true }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+futures-util = "0.3"
+# Capped below 4.6, which raised its MSRV to 1.85.
+clap = { version = ">=4.5, <4.6", features = ["derive"], optional = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"], optional = true }
+
+[dev-dependencies]
+cosmos-llm = { path = "../cosmos-llm-rust", features = ["mock"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+tokio-test = "0.4"
+
+[[bin]]
+name = "cosmos-llm-predict"
+path = "src/main.rs"
+required-features = ["cli"]

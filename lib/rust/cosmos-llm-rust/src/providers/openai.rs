@@ -5,15 +5,146 @@ use std::time::Duration;
 use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
+use crate::content::{ContentBlock, ImageSource, Role};
 use crate::error::CosmosError;
 use crate::providers::{
     map_openai_error, retry_after_from_headers, stream_from_response, transport_error,
     CompletionStream, Provider,
 };
+use crate::reasoning::ThinkingDelta;
 use crate::types::{
     Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, ToolCall, ToolCallDelta,
     Usage,
 };
+
+/// How a message is lowered for an OpenAI-shaped endpoint.
+///
+/// OpenAI itself sends neither extension. OpenRouter passes both through to the
+/// models behind it.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct WireOptions {
+    /// Send content as parts and put `cache_control` on the last text part of
+    /// a message that carries a cache hint.
+    pub cache_parts: bool,
+    /// Replay signed and redacted thinking as `reasoning_details`.
+    pub reasoning_details: bool,
+}
+
+/// A data URL for inline image bytes, a plain URL otherwise.
+fn image_url(source: &ImageSource) -> String {
+    match source {
+        ImageSource::Base64 { media_type, data } => format!("data:{media_type};base64,{data}"),
+        ImageSource::Url { url } => url.clone(),
+    }
+}
+
+/// Reads the usage object of an OpenAI-shaped response or stream chunk.
+///
+/// `prompt_tokens` already includes cached tokens here, which is the meaning
+/// [`Usage::prompt_tokens`] has everywhere. OpenRouter adds the charged `cost`
+/// and `cache_write_tokens`; both are absent from OpenAI's own body.
+pub(crate) fn usage_from_openai(usage: &Value) -> Usage {
+    let count = |v: &Value| v.as_u64().map(|n| n as u32);
+    let mut out = Usage {
+        prompt_tokens: usage["prompt_tokens"].as_u64().unwrap_or(0) as u32,
+        completion_tokens: usage["completion_tokens"].as_u64().unwrap_or(0) as u32,
+        total_tokens: usage["total_tokens"].as_u64().unwrap_or(0) as u32,
+        ..Usage::default()
+    };
+    out.cache_read_tokens = count(&usage["prompt_tokens_details"]["cached_tokens"]);
+    out.cache_write_tokens = count(&usage["prompt_tokens_details"]["cache_write_tokens"]);
+    out.reasoning_tokens = count(&usage["completion_tokens_details"]["reasoning_tokens"]);
+    // The dollar figure the account was actually charged, present only when
+    // the request asked for it (OpenRouter). Absent is not zero.
+    out.cost = usage["cost"].as_f64();
+    out
+}
+
+/// Builds the choices of an OpenAI-shaped chat completion body.
+///
+/// Reasoning is read too, wherever the endpoint puts it: OpenRouter's
+/// `reasoning_details` (text, summary, encrypted), else a plain `reasoning` or
+/// `reasoning_content` string. It becomes `Thinking` blocks ahead of the text.
+pub(crate) fn choices_from_body(provider: &str, body: &Value) -> Result<Vec<Choice>, CosmosError> {
+    let choices = body["choices"]
+        .as_array()
+        .ok_or_else(|| CosmosError::InvalidResponse {
+            provider: provider.to_owned(),
+            message: "missing 'choices' field".to_owned(),
+        })?;
+
+    Ok(choices
+        .iter()
+        .map(|c| {
+            let m = &c["message"];
+            let mut blocks = Vec::new();
+
+            if let Some(details) = m["reasoning_details"].as_array().filter(|d| !d.is_empty()) {
+                for d in details {
+                    match d["type"].as_str().unwrap_or("") {
+                        "reasoning.text" => blocks.push(ContentBlock::Thinking {
+                            text: d["text"].as_str().unwrap_or("").to_owned(),
+                            signature: d["signature"].as_str().map(str::to_owned),
+                        }),
+                        "reasoning.summary" => blocks.push(ContentBlock::Thinking {
+                            text: d["summary"].as_str().unwrap_or("").to_owned(),
+                            signature: None,
+                        }),
+                        "reasoning.encrypted" => blocks.push(ContentBlock::RedactedThinking {
+                            data: d["data"].as_str().unwrap_or("").to_owned(),
+                        }),
+                        _ => {}
+                    }
+                }
+            } else if let Some(text) = m["reasoning"]
+                .as_str()
+                .or_else(|| m["reasoning_content"].as_str())
+                .filter(|t| !t.is_empty())
+            {
+                blocks.push(ContentBlock::Thinking {
+                    text: text.to_owned(),
+                    signature: None,
+                });
+            }
+
+            if let Some(text) = m["content"].as_str().filter(|t| !t.is_empty()) {
+                blocks.push(ContentBlock::text(text));
+            }
+
+            let tool_calls: Vec<ToolCall> = m["tool_calls"]
+                .as_array()
+                .map(|calls| {
+                    calls
+                        .iter()
+                        .map(|tc| {
+                            let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
+                            ToolCall {
+                                id: tc["id"].as_str().unwrap_or_default().to_owned(),
+                                name: tc["function"]["name"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned(),
+                                input: serde_json::from_str(args_str).unwrap_or(Value::Null),
+                            }
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            blocks.extend(tool_calls.iter().cloned().map(ContentBlock::tool_use));
+
+            let role = m["role"]
+                .as_str()
+                .and_then(Role::parse)
+                .unwrap_or(Role::Assistant);
+            Choice {
+                index: c["index"].as_u64().unwrap_or(0) as u32,
+                message: Message::from_blocks(role, blocks),
+                finish_reason: c["finish_reason"].as_str().map(str::to_owned),
+                tool_calls,
+            }
+        })
+        .collect())
+}
 
 /// Default API root, used unless overridden by
 /// [`OpenAiProvider::with_base_url`] or the `OPENAI_BASE_URL` environment
@@ -127,50 +258,66 @@ impl OpenAiProvider {
 
     /// Translates one [`Message`] into OpenAI's chat message shape.
     ///
-    /// Three cases differ from a plain `{role, content}` object:
+    /// Usually one wire message comes back. The cases that differ from a plain
+    /// `{role, content}` object:
     ///
     /// * A tool result becomes `role: "tool"` with `tool_call_id`. OpenAI
-    ///   rejects a tool message without it.
+    ///   rejects a tool message without it. A tool message takes text only, so
+    ///   an image in a result is replaced by a note, and the image follows in
+    ///   an extra `user` message after the tool messages.
     /// * An assistant turn that requested tools carries a `tool_calls` array
     ///   whose `function.arguments` is a JSON **string**, not an object.
     /// * An assistant message with tool calls and no text sends
     ///   `content: null`, which is what OpenAI returned in the first place.
+    /// * Thinking is dropped: chat completions has nothing to replay it into.
     ///
     /// # Errors
     ///
     /// Returns [`CosmosError::InvalidRequest`] for a tool-role message with no
-    /// `tool_call_id`. Catching it here names the offending message; letting it
+    /// tool result. Catching it here names the offending message; letting it
     /// reach the API produces a 400 that does not.
-    pub(crate) fn message_to_wire(msg: &Message) -> Result<Value, CosmosError> {
+    pub(crate) fn message_to_wire(
+        msg: &Message,
+        opts: WireOptions,
+    ) -> Result<Vec<Value>, CosmosError> {
         if msg.is_tool_result() {
-            let id = msg
-                .tool_call_id
-                .as_deref()
-                .ok_or_else(|| CosmosError::InvalidRequest {
-                    provider: PROVIDER_NAME.to_owned(),
-                    message: "tool result message has no tool_call_id; OpenAI cannot \
-                              associate it with a call. Build it with Message::tool_result."
-                        .to_owned(),
-                    param: Some("messages[].tool_call_id".to_owned()),
-                })?;
-            let mut wire = json!({
-                "role": "tool",
-                "tool_call_id": id,
-                "content": msg.content,
-            });
-            if let Some(ref name) = msg.name {
-                wire["name"] = json!(name);
-            }
-            return Ok(wire);
+            return Self::tool_message_to_wire(msg);
         }
 
-        if msg.tool_calls.is_empty() {
-            return Ok(json!({ "role": msg.role, "content": msg.content }));
-        }
+        let has_image = msg
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Image { .. }));
+        let text = msg.text();
+
+        let mut content = if has_image || (opts.cache_parts && msg.cache.is_some()) {
+            let mut parts: Vec<Value> = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } if !text.is_empty() => {
+                        Some(json!({ "type": "text", "text": text }))
+                    }
+                    ContentBlock::Image { source } => Some(
+                        json!({ "type": "image_url", "image_url": { "url": image_url(source) } }),
+                    ),
+                    _ => None,
+                })
+                .collect();
+            if let (true, Some(hint), Some(last)) = (
+                opts.cache_parts,
+                msg.cache,
+                parts.iter_mut().rev().find(|p| p["type"] == "text"),
+            ) {
+                last["cache_control"] = hint.to_cache_control();
+            }
+            Value::Array(parts)
+        } else {
+            json!(text)
+        };
 
         let calls: Vec<Value> = msg
-            .tool_calls
-            .iter()
+            .tool_calls()
             .map(|call| {
                 json!({
                     "id": call.id,
@@ -185,13 +332,117 @@ impl OpenAiProvider {
             })
             .collect();
 
-        Ok(json!({
-            "role": msg.role,
+        let mut wire = json!({ "role": msg.role });
+        if calls.is_empty() {
+            wire["content"] = content;
+        } else {
             // A tool-calling turn commonly has no text; OpenAI's own response
             // uses null there, so replaying an empty string would not match.
-            "content": if msg.content.is_empty() { Value::Null } else { json!(msg.content) },
-            "tool_calls": calls,
-        }))
+            if content.as_array().is_some_and(Vec::is_empty) || content == json!("") {
+                content = Value::Null;
+            }
+            wire["content"] = content;
+            wire["tool_calls"] = json!(calls);
+        }
+
+        if opts.reasoning_details && msg.role == Role::Assistant {
+            let details: Vec<Value> = msg
+                .content
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Thinking {
+                        text,
+                        signature: Some(sig),
+                    } => Some(json!({
+                        "type": "reasoning.text", "text": text, "signature": sig,
+                    })),
+                    ContentBlock::RedactedThinking { data } => {
+                        Some(json!({ "type": "reasoning.encrypted", "data": data }))
+                    }
+                    _ => None,
+                })
+                .collect();
+            if !details.is_empty() {
+                wire["reasoning_details"] = json!(details);
+            }
+        }
+
+        Ok(vec![wire])
+    }
+
+    /// The `tool` messages for a tool-result message, plus a `user` message
+    /// carrying any images the results held.
+    fn tool_message_to_wire(msg: &Message) -> Result<Vec<Value>, CosmosError> {
+        let mut out = Vec::new();
+        let mut images: Vec<Value> = Vec::new();
+
+        for block in &msg.content {
+            let ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                ..
+            } = block
+            else {
+                continue;
+            };
+
+            let mut text: String = content.iter().filter_map(ContentBlock::as_text).collect();
+            let mut held = false;
+            for inner in content {
+                if let ContentBlock::Image { source } = inner {
+                    held = true;
+                    images.push(
+                        json!({ "type": "image_url", "image_url": { "url": image_url(source) } }),
+                    );
+                }
+            }
+            if held {
+                if !text.is_empty() {
+                    text.push('\n');
+                }
+                text.push_str("[image attached in the next message]");
+            }
+
+            let mut wire = json!({
+                "role": "tool",
+                "tool_call_id": tool_use_id,
+                "content": text,
+            });
+            if let Some(ref name) = msg.name {
+                wire["name"] = json!(name);
+            }
+            out.push(wire);
+        }
+
+        if out.is_empty() {
+            return Err(CosmosError::InvalidRequest {
+                provider: PROVIDER_NAME.to_owned(),
+                message: "tool message has no tool result; OpenAI cannot associate it \
+                          with a call. Build it with Message::tool_result."
+                    .to_owned(),
+                param: Some("messages[].tool_call_id".to_owned()),
+            });
+        }
+
+        if !images.is_empty() {
+            let mut parts =
+                vec![json!({ "type": "text", "text": "Image from the tool result above:" })];
+            parts.extend(images);
+            out.push(json!({ "role": "user", "content": parts }));
+        }
+        Ok(out)
+    }
+
+    /// Lowers a whole conversation. See [`OpenAiProvider::message_to_wire`].
+    pub(crate) fn messages_to_wire(
+        messages: &[Message],
+        opts: WireOptions,
+    ) -> Result<Vec<Value>, CosmosError> {
+        let mut out = Vec::with_capacity(messages.len());
+        for msg in messages {
+            out.extend(Self::message_to_wire(msg, opts)?);
+        }
+        Ok(out)
     }
 
     /// Builds the JSON request body for the chat completions endpoint.
@@ -205,11 +456,7 @@ impl OpenAiProvider {
     /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
     /// represented — see [`OpenAiProvider::message_to_wire`].
     fn build_body(req: &CompletionRequest, stream: bool) -> Result<Value, CosmosError> {
-        let messages = req
-            .messages
-            .iter()
-            .map(Self::message_to_wire)
-            .collect::<Result<Vec<_>, _>>()?;
+        let messages = Self::messages_to_wire(&req.messages, WireOptions::default())?;
 
         let mut body = json!({
             "model": req.model,
@@ -238,6 +485,9 @@ impl OpenAiProvider {
             body["stream"] = json!(true);
             body["stream_options"] = json!({ "include_usage": true });
         }
+        if let Some(effort) = req.reasoning.and_then(|r| r.nearest_effort()) {
+            body["reasoning_effort"] = json!(effort.as_str());
+        }
 
         Ok(body)
     }
@@ -246,60 +496,12 @@ impl OpenAiProvider {
         let id = body["id"].as_str().map(str::to_owned);
         let model = body["model"].as_str().map(str::to_owned);
 
-        let choices = body["choices"]
-            .as_array()
-            .ok_or_else(|| CosmosError::InvalidResponse {
-                provider: PROVIDER_NAME.to_owned(),
-                message: "missing 'choices' field".to_owned(),
-            })?
-            .iter()
-            .map(|c| {
-                let role = c["message"]["role"]
-                    .as_str()
-                    .unwrap_or("assistant")
-                    .to_owned();
-                let content = c["message"]["content"].as_str().unwrap_or("").to_owned();
-                let finish_reason = c["finish_reason"].as_str().map(str::to_owned);
-                let index = c["index"].as_u64().unwrap_or(0) as u32;
-                let tool_calls = c["message"]["tool_calls"]
-                    .as_array()
-                    .map(|calls| {
-                        calls
-                            .iter()
-                            .map(|tc| {
-                                let args_str = tc["function"]["arguments"].as_str().unwrap_or("{}");
-                                ToolCall {
-                                    id: tc["id"].as_str().unwrap_or_default().to_owned(),
-                                    name: tc["function"]["name"]
-                                        .as_str()
-                                        .unwrap_or_default()
-                                        .to_owned(),
-                                    input: serde_json::from_str(args_str).unwrap_or(Value::Null),
-                                }
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                Choice {
-                    index,
-                    message: Message::new(role, content),
-                    finish_reason,
-                    tool_calls,
-                }
-            })
-            .collect();
+        let choices = choices_from_body(PROVIDER_NAME, &body)?;
 
-        let usage = if body["usage"].is_object() {
-            Some(Usage {
-                prompt_tokens: body["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: body["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: body["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
-                // OpenAI bills from token counts; it reports no per-call price.
-                cost: None,
-            })
-        } else {
-            None
-        };
+        // OpenAI bills from token counts; it reports no per-call price.
+        let usage = body["usage"]
+            .is_object()
+            .then(|| usage_from_openai(&body["usage"]));
 
         Ok(CompletionResponse {
             id,
@@ -336,6 +538,40 @@ impl OpenAiProvider {
 ///
 /// `provider` attributes the errors this can produce; OpenRouter passes its own
 /// name so a failure is not misreported as OpenAI's.
+/// Reads the reasoning fragment of a stream delta, if it carries one.
+///
+/// Text comes from `reasoning` (OpenRouter) or `reasoning_content` (several
+/// OpenAI-compatible servers). A delta holds one fragment, so when it has no
+/// text, a replayable signature or encrypted payload from `reasoning_details`
+/// is taken instead. These endpoints number nothing, so every fragment goes
+/// to block 0.
+fn thinking_delta(delta: &Value) -> Option<ThinkingDelta> {
+    if let Some(text) = delta["reasoning"]
+        .as_str()
+        .or_else(|| delta["reasoning_content"].as_str())
+        .filter(|t| !t.is_empty())
+    {
+        return Some(ThinkingDelta::Text {
+            index: 0,
+            text: text.to_owned(),
+        });
+    }
+    delta["reasoning_details"]
+        .as_array()?
+        .iter()
+        .find_map(|d| match d["type"].as_str()? {
+            "reasoning.encrypted" => Some(ThinkingDelta::Redacted {
+                index: 0,
+                data: d["data"].as_str()?.to_owned(),
+            }),
+            "reasoning.text" => Some(ThinkingDelta::Signature {
+                index: 0,
+                signature: d["signature"].as_str()?.to_owned(),
+            }),
+            _ => None,
+        })
+}
+
 pub(crate) fn parse_openai_chunk(
     provider: &str,
     data: &str,
@@ -380,22 +616,16 @@ pub(crate) fn parse_openai_chunk(
         })
         .unwrap_or_default();
 
-    let usage = if value["usage"].is_object() {
-        Some(Usage {
-            prompt_tokens: value["usage"]["prompt_tokens"].as_u64().unwrap_or(0) as u32,
-            completion_tokens: value["usage"]["completion_tokens"].as_u64().unwrap_or(0) as u32,
-            total_tokens: value["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32,
-            cost: None,
-        })
-    } else {
-        None
-    };
+    let usage = value["usage"]
+        .is_object()
+        .then(|| usage_from_openai(&value["usage"]));
 
     let chunk = StreamChunk {
         delta: delta["content"].as_str().unwrap_or("").to_owned(),
         finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
         tool_calls,
         usage,
+        thinking: thinking_delta(delta),
     };
 
     Ok(if chunk.is_empty() { None } else { Some(chunk) })
@@ -543,40 +773,43 @@ mod tests {
 
     #[test]
     fn wire_plain_message_is_role_and_content_only() {
-        let wire = OpenAiProvider::message_to_wire(&Message::user("hi")).unwrap();
-        assert_eq!(wire, serde_json::json!({"role": "user", "content": "hi"}));
+        let wire =
+            OpenAiProvider::message_to_wire(&Message::user("hi"), WireOptions::default()).unwrap();
+        assert_eq!(
+            wire,
+            vec![serde_json::json!({"role": "user", "content": "hi"})]
+        );
     }
 
     #[test]
     fn wire_tool_result_uses_tool_role_and_call_id() {
         let msg = Message::tool_result("call_1", "72F");
-        let wire = OpenAiProvider::message_to_wire(&msg).unwrap();
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
         assert_eq!(
             wire,
-            serde_json::json!({
+            vec![serde_json::json!({
                 "role": "tool",
                 "tool_call_id": "call_1",
                 "content": "72F",
-            })
+            })]
         );
     }
 
     #[test]
     fn wire_tool_result_includes_optional_name() {
         let msg = Message::tool_result("call_1", "72F").with_name("get_weather");
-        let wire = OpenAiProvider::message_to_wire(&msg).unwrap();
-        assert_eq!(wire["name"], "get_weather");
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        assert_eq!(wire[0]["name"], "get_weather");
     }
 
     #[test]
     fn wire_tool_result_without_id_fails_locally() {
         // Constructed by hand rather than via `tool_result`, which is the only
         // way to reach this state. The error must name the fix.
-        let mut msg = Message::new("tool", "72F");
-        msg.tool_call_id = None;
-        let err = OpenAiProvider::message_to_wire(&msg).unwrap_err();
+        let msg = Message::new(Role::Tool, "72F");
+        let err = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap_err();
         assert!(
-            matches!(err, CosmosError::InvalidRequest { message: ref m, .. } if m.contains("tool_call_id"))
+            matches!(err, CosmosError::InvalidRequest { message: ref m, .. } if m.contains("tool result"))
         );
     }
 
@@ -590,7 +823,8 @@ mod tests {
                 input: serde_json::json!({"city": "Boston"}),
             }],
         );
-        let wire = OpenAiProvider::message_to_wire(&msg).unwrap();
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        let wire = &wire[0];
 
         assert_eq!(wire["role"], "assistant");
         // No text on a pure tool-calling turn: null, matching what OpenAI sent.
@@ -617,8 +851,8 @@ mod tests {
                 input: serde_json::json!({}),
             }],
         );
-        let wire = OpenAiProvider::message_to_wire(&msg).unwrap();
-        assert_eq!(wire["content"], "Let me check.");
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        assert_eq!(wire[0]["content"], "Let me check.");
     }
 
     #[test]
@@ -831,7 +1065,7 @@ mod tests {
             }
         });
         let resp = OpenAiProvider::map_response(body).unwrap();
-        assert_eq!(resp.content(), Some("Hello!"));
+        assert_eq!(resp.content().as_deref(), Some("Hello!"));
         assert!(!resp.tool_use());
         assert_eq!(resp.usage.unwrap().total_tokens, 15);
     }
@@ -866,5 +1100,131 @@ mod tests {
         assert_eq!(calls[0].id, "call_1");
         assert_eq!(calls[0].name, "get_weather");
         assert_eq!(calls[0].input, serde_json::json!({"city": "Boston"}));
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::content::CacheHint;
+    use crate::reasoning::{Reasoning, ReasoningEffort};
+
+    #[test]
+    fn user_images_become_image_url_parts() {
+        let msg = Message::user_blocks(vec![
+            ContentBlock::text("what is this"),
+            ContentBlock::image_base64("image/png", [1u8, 2, 3]),
+            ContentBlock::image_url("https://x/y.png"),
+        ]);
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        assert_eq!(
+            wire[0]["content"],
+            json!([
+                {"type": "text", "text": "what is this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AQID"}},
+                {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+            ])
+        );
+    }
+
+    #[test]
+    fn an_image_in_a_tool_result_becomes_a_note_plus_a_user_message() {
+        let msg = Message::tool_result_blocks(
+            "call_1",
+            vec![
+                ContentBlock::text("screenshot"),
+                ContentBlock::image_base64("image/png", [7u8]),
+            ],
+            false,
+        );
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        assert_eq!(wire.len(), 2);
+        assert_eq!(wire[0]["role"], "tool");
+        assert_eq!(wire[0]["tool_call_id"], "call_1");
+        assert!(wire[0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with("screenshot\n[image"));
+        assert_eq!(wire[1]["role"], "user");
+        assert_eq!(wire[1]["content"][1]["type"], "image_url");
+    }
+
+    #[test]
+    fn thinking_is_dropped_on_replay() {
+        let msg = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                text: "t".into(),
+                signature: Some("s".into()),
+            },
+            ContentBlock::text("hi"),
+        ]);
+        let wire = OpenAiProvider::message_to_wire(&msg, WireOptions::default()).unwrap();
+        assert_eq!(wire, vec![json!({"role": "assistant", "content": "hi"})]);
+    }
+
+    #[test]
+    fn the_request_body_never_contains_cache_control() {
+        let mut req = CompletionRequest::new(
+            "gpt-4o",
+            vec![
+                Message::system("s").with_cache(CacheHint::Ephemeral),
+                Message::user("u"),
+            ],
+        )
+        .with_tools(vec![json!({"type": "function"})]);
+        crate::apply_default_cache_breakpoints(&mut req);
+        let body = OpenAiProvider::build_body(&req, false).unwrap();
+        assert!(!body.to_string().contains("cache_control"));
+    }
+
+    #[test]
+    fn usage_reads_cached_and_reasoning_tokens() {
+        let resp = OpenAiProvider::map_response(json!({
+            "choices": [{ "message": { "role": "assistant", "content": "x" }, "finish_reason": "stop" }],
+            "usage": {
+                "prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150,
+                "prompt_tokens_details": { "cached_tokens": 64 },
+                "completion_tokens_details": { "reasoning_tokens": 30 }
+            }
+        }))
+        .unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.cache_read_tokens, Some(64));
+        assert_eq!(usage.reasoning_tokens, Some(30));
+        assert_eq!(usage.prompt_tokens, 100);
+    }
+
+    #[test]
+    fn reasoning_maps_to_reasoning_effort() {
+        let req = CompletionRequest::new("o3", vec![Message::user("hi")])
+            .with_reasoning(Reasoning::effort(ReasoningEffort::Medium));
+        assert_eq!(
+            OpenAiProvider::build_body(&req, false).unwrap()["reasoning_effort"],
+            "medium"
+        );
+
+        let req = CompletionRequest::new("o3", vec![Message::user("hi")])
+            .with_reasoning(Reasoning::budget(20_000));
+        assert_eq!(
+            OpenAiProvider::build_body(&req, false).unwrap()["reasoning_effort"],
+            "high"
+        );
+    }
+
+    #[test]
+    fn reasoning_content_in_a_stream_becomes_a_thinking_delta() {
+        let chunk = parse_openai_chunk(
+            "openai",
+            r#"{"choices":[{"delta":{"reasoning_content":"step 1"}}]}"#,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            chunk.thinking,
+            Some(ThinkingDelta::Text {
+                index: 0,
+                text: "step 1".into()
+            })
+        );
     }
 }

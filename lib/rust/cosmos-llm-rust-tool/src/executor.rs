@@ -1,7 +1,10 @@
 use serde_json::{Map, Value};
 
+#[cfg(feature = "async")]
+use crate::context::ToolContext;
 use crate::definition::{Handler, ToolDefinition};
 use crate::error::ToolError;
+use crate::output_limit::{limit_output, LimitedOutput, OutputLimit, SpillStore};
 
 /// Executes a [`ToolDefinition`] against a set of parameters.
 ///
@@ -72,6 +75,43 @@ impl Executor {
         Ok(Value::Object(resolved))
     }
 
+    /// Renders a tool result as the string the model reads, then applies the
+    /// tool's [`OutputLimit`] (or `default_limit` when it has none).
+    ///
+    /// A JSON string is unwrapped rather than re-quoted. This is the step that
+    /// keeps one oversized result from entering the history; callers that
+    /// stringify results should go through it so no tool can forget the cap.
+    /// The UI still gets the unlimited `value`.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::output_limit::OutputLimit;
+    /// use cosmos_llm_tool::{Executor, ToolDefinition};
+    /// use serde_json::json;
+    ///
+    /// let tool = ToolDefinition::new("cat").output_limit(OutputLimit::new().max_lines(5));
+    /// let big = json!("x\n".repeat(100));
+    /// let out = Executor::limit_result(&tool, &big, &OutputLimit::new(), None);
+    /// assert!(out.truncated);
+    /// ```
+    pub fn limit_result(
+        tool: &ToolDefinition,
+        value: &Value,
+        default_limit: &OutputLimit,
+        spill: Option<&SpillStore>,
+    ) -> LimitedOutput {
+        let text = match value {
+            Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        limit_output(
+            &text,
+            tool.output_limit.as_ref().unwrap_or(default_limit),
+            spill,
+        )
+    }
+
     /// Validates parameters, applies defaults, and calls the tool handler.
     ///
     /// `params` must be a JSON object; other shapes return a validation error.
@@ -105,7 +145,9 @@ impl Executor {
         let sync = match handler {
             Handler::Sync(f) => f,
             #[cfg(feature = "async")]
-            Handler::Async(_) => return Err(ToolError::AsyncHandler(tool.name.clone())),
+            Handler::Async(_) | Handler::Context(_) => {
+                return Err(ToolError::AsyncHandler(tool.name.clone()))
+            }
         };
 
         let resolved = Self::resolve_params(tool, params)?;
@@ -155,17 +197,69 @@ impl Executor {
     /// ```
     #[cfg(feature = "async")]
     pub async fn execute_async(tool: &ToolDefinition, params: Value) -> Result<Value, ToolError> {
+        let ctx = ToolContext::detached(String::new());
+        Self::run_async(tool, params, ctx, false).await
+    }
+
+    /// Runs a tool with a live [`ToolContext`], as the agent loop does.
+    ///
+    /// Differs from [`Executor::execute_async`] in two ways. A context handler
+    /// receives `ctx` (a plain async or sync handler ignores it). And a sync
+    /// handler runs on [`tokio::task::spawn_blocking`], so it cannot stall the
+    /// loop; it also cannot be interrupted, and keeps running in the
+    /// background if the call is abandoned. Needs a Tokio runtime.
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Executor::execute_async`]; a sync handler that panics is
+    /// reported as [`ToolError::Execution`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::{Executor, ToolContext, ToolDefinition};
+    /// use serde_json::json;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let tool = ToolDefinition::new("t").context_handler(|_, ctx| {
+    ///     Box::pin(async move { Ok(json!(ctx.call_id)) })
+    /// });
+    /// let ctx = ToolContext::detached("call_1");
+    /// assert_eq!(Executor::execute_with(&tool, json!({}), ctx).await.unwrap(), json!("call_1"));
+    /// # })
+    /// ```
+    #[cfg(feature = "async")]
+    pub async fn execute_with(
+        tool: &ToolDefinition,
+        params: Value,
+        ctx: ToolContext,
+    ) -> Result<Value, ToolError> {
+        Self::run_async(tool, params, ctx, true).await
+    }
+
+    #[cfg(feature = "async")]
+    async fn run_async(
+        tool: &ToolDefinition,
+        params: Value,
+        ctx: ToolContext,
+        blocking: bool,
+    ) -> Result<Value, ToolError> {
         let handler = tool
             .handler_ref()
             .ok_or_else(|| ToolError::NoHandler(tool.name.clone()))?
             .clone();
 
         let resolved = Self::resolve_params(tool, &params)?;
+        let name = tool.name.clone();
 
         let run = async move {
             match handler {
+                Handler::Sync(f) if blocking => tokio::task::spawn_blocking(move || f(&resolved))
+                    .await
+                    .unwrap_or_else(|e| Err(format!("handler panicked: {e}"))),
                 Handler::Sync(f) => f(&resolved),
                 Handler::Async(f) => f(resolved).await,
+                Handler::Context(f) => f(resolved, ctx).await,
             }
         };
 
@@ -174,7 +268,7 @@ impl Executor {
                 tokio::time::timeout(limit, run)
                     .await
                     .map_err(|_| ToolError::Timeout {
-                        tool: tool.name.clone(),
+                        tool: name.clone(),
                         elapsed: limit,
                     })?
             }
@@ -182,7 +276,7 @@ impl Executor {
         };
 
         outcome.map_err(|msg| ToolError::Execution {
-            tool: tool.name.clone(),
+            tool: name,
             message: msg,
         })
     }

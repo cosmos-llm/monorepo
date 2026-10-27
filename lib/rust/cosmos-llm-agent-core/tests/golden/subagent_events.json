@@ -1,0 +1,20 @@
+[
+  {
+    "event": "subagent",
+    "call_id": "toolu_1",
+    "agent": "explore",
+    "inner": {
+      "type": "text_delta",
+      "text": "looking"
+    }
+  },
+  {
+    "event": "subagent",
+    "call_id": "toolu_1/toolu_2",
+    "agent": "general",
+    "inner": {
+      "type": "tool_started",
+      "call_id": "toolu_9"
+    }
+  }
+]

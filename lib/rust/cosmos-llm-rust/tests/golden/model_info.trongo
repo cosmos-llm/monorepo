@@ -1,0 +1,11 @@
+{
+  :context_window 200000
+  :id "claude-sonnet-4-6"
+  :max_output_tokens 64000
+  :pricing {:cache_read 0.3 :cache_write 3.75 :input 3 :output 15}
+  :provider "anthropic"
+  :supports_images true
+  :supports_prompt_cache true
+  :supports_reasoning true
+  :supports_tools true
+}

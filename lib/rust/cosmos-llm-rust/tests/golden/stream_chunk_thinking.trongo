@@ -1,0 +1,8 @@
+{
+  :delta "Hello"
+  :thinking {:index 0 :signature "sig-abc" :type "signature"}
+  :tool_calls [
+    {:arguments "{\"path\":" :id "toolu_1" :index 0 :name "read"}
+  ]
+  :usage {:cache_read_tokens 4 :completion_tokens 5 :prompt_tokens 10 :reasoning_tokens 2 :total_tokens 15}
+}

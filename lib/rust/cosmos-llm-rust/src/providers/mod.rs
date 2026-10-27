@@ -74,6 +74,42 @@ pub trait Provider: Send + Sync {
         })
     }
 
+    /// Whether [`Provider::models_info`] returns more than ids.
+    ///
+    /// [`Client::model_info`](crate::Client::model_info) only makes the extra
+    /// request for providers that say yes; for the rest the built-in table
+    /// answers just as well, without a network call.
+    fn lists_model_details(&self) -> bool {
+        false
+    }
+
+    /// Lists the provider's models with whatever it says about them.
+    ///
+    /// The default pairs each id from [`Provider::models`] with the built-in
+    /// table, so a provider that lists ids only needs nothing more.
+    /// OpenRouter overrides this to read the limits and prices its catalogue
+    /// carries.
+    fn models_info<'a>(
+        &'a self,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<crate::model::ModelInfo>, CosmosError>> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let provider = self.name().to_owned();
+            let ids = self.models().await?;
+            Ok(ids
+                .into_iter()
+                .map(|id| match crate::model::ModelInfo::builtin(&id) {
+                    Some(mut info) => {
+                        info.provider.clone_from(&provider);
+                        info.id = id;
+                        info
+                    }
+                    None => crate::model::ModelInfo::new(&provider, id),
+                })
+                .collect())
+        })
+    }
+
     /// Returns this provider's canonical name, as accepted by [`resolve`].
     ///
     /// Used to attribute errors ([`CosmosError::provider`]) and to identify a

@@ -1,0 +1,141 @@
+{
+  :items [
+    {
+      :first {
+        :argv [
+          {:text "cargo"}
+          {:text "test"}
+        ]
+        :assignments [
+          {
+            :name "FOO"
+            :value {:text "1"}
+          }
+        ]
+        :type "simple"
+      }
+      :rest [
+        {
+          :command {
+            :argv [
+              {:text "rm"}
+              {:text "-rf"}
+              {
+                :expansions [
+                  {:type "tilde"}
+                ]
+                :text "~"
+              }
+            ]
+            :type "simple"
+          }
+          :op "and"
+        }
+        {
+          :command {
+            :argv [
+              {:text "echo"}
+              {
+                :expansions [
+                  {:name "?" :type "variable"}
+                ]
+                :text "failed: \$?"
+              }
+            ]
+            :redirects [
+              {
+                :fd 2
+                :op "dup_out"
+                :target {:text "1"}
+              }
+              {
+                :op "write"
+                :target {:text "/tmp/log"}
+              }
+            ]
+            :type "simple"
+          }
+          :op "or"
+        }
+      ]
+      :type "chain"
+    }
+    {
+      :command {
+        :commands [
+          {
+            :command {
+              :items [
+                {
+                  :argv [
+                    {:text "cd"}
+                    {:text "sub"}
+                  ]
+                  :type "simple"
+                }
+                {
+                  :argv [
+                    {:text "ls"}
+                    {:glob true :text "*.rs"}
+                  ]
+                  :type "simple"
+                }
+              ]
+              :type "sequence"
+            }
+            :type "subshell"
+          }
+          {
+            :argv [
+              {:text "wc"}
+              {:text "-l"}
+            ]
+            :type "simple"
+          }
+        ]
+        :negated false
+        :type "pipeline"
+      }
+      :type "background"
+    }
+    {
+      :commands [
+        {
+          :argv [
+            {:text "cat"}
+          ]
+          :redirects [
+            {
+              :body {
+                :expansions [
+                  {
+                    :command {
+                      :argv [
+                        {:text "id"}
+                      ]
+                      :type "simple"
+                    }
+                    :type "command_substitution"
+                  }
+                ]
+                :text "\$(id)\n"
+              }
+              :op "here_doc"
+              :target {:text "EOF"}
+            }
+          ]
+          :type "simple"
+        }
+        {
+          :argv [
+            {:text "sh"}
+          ]
+          :type "simple"
+        }
+      ]
+      :negated false
+      :type "pipeline"
+    }
+  ]
+  :type "sequence"
+}

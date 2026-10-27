@@ -1,0 +1,47 @@
+[
+  {
+    "model": "claude-sonnet-4",
+    "cwd": null,
+    "system_prompt": null,
+    "instructions": true,
+    "max_steps": 50,
+    "reasoning": null,
+    "permissions": {
+      "mode": "auto_edit",
+      "allow": [],
+      "deny": [],
+      "shell_tools": [
+        "bash",
+        "shell"
+      ],
+      "edit_tools": [
+        "write",
+        "edit",
+        "multi_edit"
+      ]
+    },
+    "context": {
+      "window": 100000,
+      "reserve_output": null,
+      "compact_at": 0.85
+    },
+    "compaction": {
+      "enabled": true,
+      "strategy": "summarize",
+      "model": null,
+      "keep_turns": 2,
+      "tail_fraction": 0.25,
+      "recent_user_tokens": 20000,
+      "tool_result_chars": 2000,
+      "chunk_tokens": 60000,
+      "summary_max_tokens": 4096
+    },
+    "sessions": {
+      "enabled": true,
+      "dir": null,
+      "retention_days": null
+    },
+    "models": [],
+    "event_buffer": 1024
+  }
+]

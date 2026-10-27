@@ -1,0 +1,11 @@
+{
+  "id": "claude-sonnet-4-6",
+  "provider": "anthropic",
+  "context_window": 200000,
+  "max_output_tokens": 64000,
+  "supports_tools": true,
+  "supports_images": true,
+  "supports_reasoning": true,
+  "supports_prompt_cache": true,
+  "pricing": {"input": 3.0, "output": 15.0, "cache_read": 0.3, "cache_write": 3.75}
+}

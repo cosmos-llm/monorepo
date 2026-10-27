@@ -1,67 +1,132 @@
 use serde::{Deserialize, Serialize};
 
+use crate::content::{CacheHint, ContentBlock, Role};
+use crate::reasoning::{Reasoning, ThinkingDelta};
 use crate::routing::OpenRouterRouting;
 use serde_json::Value;
+use tokio_util::sync::CancellationToken;
 
 /// A single message in a conversation.
 ///
-/// Beyond `role` and `content`, a message can carry the bookkeeping a
-/// tool-calling loop needs: which call a result answers
-/// ([`Message::tool_result`]) and which calls an assistant turn requested
-/// ([`Message::assistant_with_tools`]). Providers disagree about how to encode
-/// that on the wire — OpenAI uses a `"tool"` role with a `tool_call_id`,
-/// Anthropic a `"user"` message holding a `tool_result` content block — so each
-/// provider translates these fields itself.
+/// A message is a [`Role`] and an ordered list of [`ContentBlock`]s: text,
+/// images, thinking, tool calls, and tool results. The constructors cover the
+/// common shapes ([`Message::user`], [`Message::tool_result`],
+/// [`Message::assistant_with_tools`]); [`Message::user_blocks`] and
+/// [`Message::assistant_blocks`] take blocks directly. Read content back with
+/// [`Message::text`], [`Message::tool_calls`] and [`Message::tool_result_id`].
 ///
-/// The tool fields are skipped when serializing if unset, so a plain
-/// text message produces exactly the same JSON it did before they existed.
+/// Providers disagree about how to encode tool traffic on the wire — OpenAI
+/// uses a `"tool"` role with a `tool_call_id`, Anthropic a `"user"` message
+/// holding a `tool_result` block — so each provider lowers the blocks itself.
+///
+/// # Serialization
+///
+/// Serializes as `{"role": "user", "content": [{"type": "text", ...}]}`.
+/// Deserialization also accepts the earlier shape: a string `content` with
+/// `tool_call_id` and `tool_calls` side fields.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "MessageRepr")]
 #[non_exhaustive]
 pub struct Message {
-    /// Role of the message author: `"system"`, `"user"`, `"assistant"`, or
-    /// `"tool"`.
-    pub role: String,
-    /// Text content of the message.
-    pub content: String,
-    /// For `role == "tool"`: the identifier of the call this result answers.
-    ///
-    /// Required by every provider that supports parallel tool calls — without
-    /// it, the association between a result and its call is unrecoverable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tool_call_id: Option<String>,
-    /// For `role == "assistant"`: the calls this message requested.
-    ///
-    /// A provider replaying an assistant turn needs these, not just the text;
-    /// see [`Message::assistant_with_tools`].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tool_calls: Vec<ToolCall>,
+    /// Role of the message author.
+    pub role: Role,
+    /// Content blocks, in order.
+    pub content: Vec<ContentBlock>,
     /// Optional tool name, which some providers attach to a function result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// A prompt-cache breakpoint after this message's last block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<CacheHint>,
+}
+
+/// Accepts both the current message shape and the earlier one.
+#[derive(Deserialize)]
+struct MessageRepr {
+    role: Role,
+    #[serde(default)]
+    content: Value,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    cache: Option<CacheHint>,
+    // Side fields of the earlier shape.
+    #[serde(default)]
+    tool_call_id: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<ToolCall>,
+}
+
+impl TryFrom<MessageRepr> for Message {
+    type Error = String;
+
+    fn try_from(repr: MessageRepr) -> Result<Self, String> {
+        let mut content: Vec<ContentBlock> = match repr.content {
+            Value::Null => Vec::new(),
+            Value::String(s) if s.is_empty() => Vec::new(),
+            Value::String(s) => vec![ContentBlock::text(s)],
+            other => serde_json::from_value(other).map_err(|e| e.to_string())?,
+        };
+        if let Some(id) = repr.tool_call_id {
+            content = vec![ContentBlock::ToolResult {
+                tool_use_id: id,
+                content,
+                is_error: false,
+            }];
+        }
+        content.extend(repr.tool_calls.into_iter().map(ContentBlock::tool_use));
+        Ok(Self {
+            role: repr.role,
+            content,
+            name: repr.name,
+            cache: repr.cache,
+        })
+    }
 }
 
 impl Message {
-    /// Creates a new message.
+    /// Creates a text message.
     ///
-    /// # Arguments
-    ///
-    /// * `role` — one of `"system"`, `"user"`, `"assistant"`, or `"tool"`.
-    /// * `content` — message text.
+    /// An empty `text` produces no blocks, so an assistant turn that only
+    /// calls tools carries no empty text block.
     ///
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::Message;
-    /// let msg = Message::new("user", "Hello!");
-    /// assert_eq!(msg.role, "user");
+    /// use cosmos_llm::{Message, Role};
+    /// let msg = Message::new(Role::User, "Hello!");
+    /// assert_eq!(msg.role, Role::User);
+    /// assert_eq!(msg.text(), "Hello!");
     /// ```
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+    pub fn new(role: Role, text: impl Into<String>) -> Self {
+        let text = text.into();
         Self {
-            role: role.into(),
-            content: content.into(),
-            tool_call_id: None,
-            tool_calls: Vec::new(),
+            role,
+            content: if text.is_empty() {
+                Vec::new()
+            } else {
+                vec![ContentBlock::text(text)]
+            },
             name: None,
+            cache: None,
+        }
+    }
+
+    /// Creates a message from blocks.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{ContentBlock, Message, Role};
+    /// let msg = Message::from_blocks(Role::User, vec![ContentBlock::text("hi")]);
+    /// assert_eq!(msg.text(), "hi");
+    /// ```
+    pub fn from_blocks(role: Role, content: Vec<ContentBlock>) -> Self {
+        Self {
+            role,
+            content,
+            name: None,
+            cache: None,
         }
     }
 
@@ -70,12 +135,12 @@ impl Message {
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::Message;
+    /// use cosmos_llm::{Message, Role};
     /// let msg = Message::system("You are a helpful assistant.");
-    /// assert_eq!(msg.role, "system");
+    /// assert_eq!(msg.role, Role::System);
     /// ```
     pub fn system(content: impl Into<String>) -> Self {
-        Self::new("system", content)
+        Self::new(Role::System, content)
     }
 
     /// Creates a `user` role message.
@@ -83,12 +148,28 @@ impl Message {
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::Message;
+    /// use cosmos_llm::{Message, Role};
     /// let msg = Message::user("What is 2+2?");
-    /// assert_eq!(msg.role, "user");
+    /// assert_eq!(msg.role, Role::User);
     /// ```
     pub fn user(content: impl Into<String>) -> Self {
-        Self::new("user", content)
+        Self::new(Role::User, content)
+    }
+
+    /// Creates a `user` message from blocks, e.g. text plus an image.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{ContentBlock, Message};
+    /// let msg = Message::user_blocks(vec![
+    ///     ContentBlock::text("What is in this picture?"),
+    ///     ContentBlock::image_url("https://example.com/cat.png"),
+    /// ]);
+    /// assert_eq!(msg.content.len(), 2);
+    /// ```
+    pub fn user_blocks(content: Vec<ContentBlock>) -> Self {
+        Self::from_blocks(Role::User, content)
     }
 
     /// Creates an `assistant` role message.
@@ -96,12 +177,18 @@ impl Message {
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::Message;
+    /// use cosmos_llm::{Message, Role};
     /// let msg = Message::assistant("4");
-    /// assert_eq!(msg.role, "assistant");
+    /// assert_eq!(msg.role, Role::Assistant);
     /// ```
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new("assistant", content)
+        Self::new(Role::Assistant, content)
+    }
+
+    /// Creates an `assistant` message from blocks, e.g. a response's thinking,
+    /// text and tool calls kept in order.
+    pub fn assistant_blocks(content: Vec<ContentBlock>) -> Self {
+        Self::from_blocks(Role::Assistant, content)
     }
 
     /// Creates a message carrying a tool's result back to the model.
@@ -114,20 +201,52 @@ impl Message {
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::Message;
+    /// use cosmos_llm::{Message, Role};
     ///
     /// let msg = Message::tool_result("call_1", "72°F and sunny");
-    /// assert_eq!(msg.role, "tool");
-    /// assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+    /// assert_eq!(msg.role, Role::Tool);
+    /// assert_eq!(msg.tool_result_id(), Some("call_1"));
+    /// assert_eq!(msg.text(), "72°F and sunny");
     /// ```
     pub fn tool_result(call_id: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: "tool".to_owned(),
-            content: content.into(),
-            tool_call_id: Some(call_id.into()),
-            tool_calls: Vec::new(),
-            name: None,
-        }
+        Self::tool_result_blocks(call_id, Self::new(Role::Tool, content).content, false)
+    }
+
+    /// Creates a tool result that reports a failure.
+    ///
+    /// Anthropic sets `is_error` on the block; OpenAI has no such flag, so the
+    /// text alone carries the failure.
+    pub fn tool_error(call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::tool_result_blocks(call_id, Self::new(Role::Tool, content).content, true)
+    }
+
+    /// Creates a tool result from blocks, so text and images can travel
+    /// together (a `read` of a PNG, a screenshot tool).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{ContentBlock, Message};
+    /// let msg = Message::tool_result_blocks(
+    ///     "call_1",
+    ///     vec![ContentBlock::text("screenshot"), ContentBlock::image_base64("image/png", [1, 2])],
+    ///     false,
+    /// );
+    /// assert_eq!(msg.tool_result_id(), Some("call_1"));
+    /// ```
+    pub fn tool_result_blocks(
+        call_id: impl Into<String>,
+        content: Vec<ContentBlock>,
+        is_error: bool,
+    ) -> Self {
+        Self::from_blocks(
+            Role::Tool,
+            vec![ContentBlock::ToolResult {
+                tool_use_id: call_id.into(),
+                content,
+                is_error,
+            }],
+        )
     }
 
     /// Creates a message carrying a tool's result serialized from JSON.
@@ -145,11 +264,11 @@ impl Message {
     /// use serde_json::json;
     ///
     /// let msg = Message::tool_result_json("call_1", &json!({"temp_f": 72}));
-    /// assert_eq!(msg.content, r#"{"temp_f":72}"#);
+    /// assert_eq!(msg.text(), r#"{"temp_f":72}"#);
     ///
     /// // A bare string is not re-quoted.
     /// let plain = Message::tool_result_json("call_2", &json!("done"));
-    /// assert_eq!(plain.content, "done");
+    /// assert_eq!(plain.text(), "done");
     /// ```
     pub fn tool_result_json(call_id: impl Into<String>, content: &Value) -> Self {
         let text = match content {
@@ -168,7 +287,7 @@ impl Message {
     /// # Examples
     ///
     /// ```
-    /// use cosmos_llm::{Message, ToolCall};
+    /// use cosmos_llm::{Message, Role, ToolCall};
     /// use serde_json::json;
     ///
     /// let msg = Message::assistant_with_tools(
@@ -179,17 +298,14 @@ impl Message {
     ///         input: json!({"city": "Boston"}),
     ///     }],
     /// );
-    /// assert_eq!(msg.role, "assistant");
-    /// assert_eq!(msg.tool_calls.len(), 1);
+    /// assert_eq!(msg.role, Role::Assistant);
+    /// assert_eq!(msg.tool_calls().count(), 1);
     /// ```
     pub fn assistant_with_tools(content: impl Into<String>, tool_calls: Vec<ToolCall>) -> Self {
-        Self {
-            role: "assistant".to_owned(),
-            content: content.into(),
-            tool_call_id: None,
-            tool_calls,
-            name: None,
-        }
+        let mut msg = Self::new(Role::Assistant, content);
+        msg.content
+            .extend(tool_calls.into_iter().map(ContentBlock::tool_use));
+        msg
     }
 
     /// Attaches a tool name to this message, returning `self`.
@@ -210,6 +326,62 @@ impl Message {
         self
     }
 
+    /// Marks a prompt-cache breakpoint after this message, returning `self`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CacheHint, Message};
+    /// let msg = Message::system("long prompt").with_cache(CacheHint::Ephemeral);
+    /// assert_eq!(msg.cache, Some(CacheHint::Ephemeral));
+    /// ```
+    pub fn with_cache(mut self, hint: CacheHint) -> Self {
+        self.cache = Some(hint);
+        self
+    }
+
+    /// The concatenated text of this message.
+    ///
+    /// Joins the `Text` blocks. For a tool result it is the text inside the
+    /// result. Thinking, images and tool calls contribute nothing.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{ContentBlock, Message};
+    /// let msg = Message::assistant_blocks(vec![
+    ///     ContentBlock::text("a"),
+    ///     ContentBlock::Thinking { text: "hmm".into(), signature: None },
+    ///     ContentBlock::text("b"),
+    /// ]);
+    /// assert_eq!(msg.text(), "ab");
+    /// ```
+    pub fn text(&self) -> String {
+        let mut out = String::new();
+        push_text(&mut out, &self.content);
+        out
+    }
+
+    /// The tool calls this message requested, in order.
+    pub fn tool_calls(&self) -> impl Iterator<Item = ToolCall> + '_ {
+        self.content.iter().filter_map(|b| match b {
+            ContentBlock::ToolUse { id, name, input } => Some(ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                input: input.clone(),
+            }),
+            _ => None,
+        })
+    }
+
+    /// The id of the call this message answers, if it carries a tool result.
+    pub fn tool_result_id(&self) -> Option<&str> {
+        self.content.iter().find_map(|b| match b {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        })
+    }
+
     /// Returns `true` if this message carries a tool result.
     ///
     /// # Examples
@@ -221,7 +393,17 @@ impl Message {
     /// assert!(!Message::user("hi").is_tool_result());
     /// ```
     pub fn is_tool_result(&self) -> bool {
-        self.role == "tool"
+        self.role == Role::Tool || self.tool_result_id().is_some()
+    }
+}
+
+fn push_text(out: &mut String, blocks: &[ContentBlock]) {
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => out.push_str(text),
+            ContentBlock::ToolResult { content, .. } => push_text(out, content),
+            _ => {}
+        }
     }
 }
 
@@ -236,7 +418,7 @@ impl Message {
 ///     .with_temperature(0.7)
 ///     .with_max_tokens(256);
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompletionRequest {
     /// Model identifier, e.g. `"gpt-4o"` or `"claude-3-5-sonnet-20241022"`.
     pub model: String,
@@ -291,6 +473,18 @@ pub struct CompletionRequest {
     /// ```
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub extra: std::collections::BTreeMap<String, Value>,
+    /// How much the model should reason. See [`CompletionRequest::with_reasoning`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<Reasoning>,
+    /// A prompt-cache breakpoint after the tool list. See
+    /// [`CompletionRequest::with_cache_tools`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_tools: Option<CacheHint>,
+    /// Cancels the request when fired. See [`CompletionRequest::with_cancel`].
+    ///
+    /// A live handle, not data, so it is never serialized.
+    #[serde(skip)]
+    pub cancel: Option<CancellationToken>,
 }
 
 impl CompletionRequest {
@@ -319,6 +513,9 @@ impl CompletionRequest {
             tools: None,
             tool_choice: None,
             extra: std::collections::BTreeMap::new(),
+            reasoning: None,
+            cache_tools: None,
+            cancel: None,
         }
     }
 
@@ -420,6 +617,61 @@ impl CompletionRequest {
         self
     }
 
+    /// Asks the model to reason before answering.
+    ///
+    /// Anthropic gets `thinking: {type: "enabled", budget_tokens}`; effort maps
+    /// to a budget (minimal 1k, low 2k, medium 8k, high 24k). `max_tokens` is
+    /// raised to stay above the budget, and `temperature` and `top_p` are
+    /// dropped, since Anthropic rejects them with thinking on. OpenAI gets
+    /// `reasoning_effort` and returns no reasoning text, only
+    /// `Usage::reasoning_tokens`. OpenRouter gets `reasoning`, and returns text.
+    /// A field in [`CompletionRequest::extra`] still overrides all of this.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CompletionRequest, Message, Reasoning, ReasoningEffort};
+    /// let req = CompletionRequest::new("claude-sonnet-4-6", vec![Message::user("hi")])
+    ///     .with_reasoning(Reasoning::effort(ReasoningEffort::High));
+    /// assert!(req.reasoning.unwrap().is_on());
+    /// ```
+    pub fn with_reasoning(mut self, reasoning: Reasoning) -> Self {
+        self.reasoning = Some(reasoning);
+        self
+    }
+
+    /// Marks a prompt-cache breakpoint after the tool list. Anthropic only.
+    ///
+    /// See [`apply_default_cache_breakpoints`](crate::apply_default_cache_breakpoints) for the usual placement.
+    pub fn with_cache_tools(mut self, hint: CacheHint) -> Self {
+        self.cache_tools = Some(hint);
+        self
+    }
+
+    /// Makes the request cancellable.
+    ///
+    /// [`Client`](crate::Client) races the call against the token: when it
+    /// fires, the in-flight HTTP request is dropped, no retry attempt starts,
+    /// and the call returns [`CosmosError::Cancelled`](crate::CosmosError). A
+    /// stream yields that error once and then ends. The token rides on the
+    /// request so the [`Provider`](crate::providers::Provider) trait does not
+    /// change; calling a provider directly does not honour it.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{CancellationToken, CompletionRequest, Message};
+    /// let token = CancellationToken::new();
+    /// let req = CompletionRequest::new("m", vec![Message::user("hi")])
+    ///     .with_cancel(token.clone());
+    /// token.cancel();
+    /// assert!(req.cancel.unwrap().is_cancelled());
+    /// ```
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
+        self
+    }
+
     /// Sets one extra top-level body field. See [`CompletionRequest::extra`].
     ///
     /// Calling this twice with the same key replaces the earlier value.
@@ -492,17 +744,35 @@ impl CompletionRequest {
 /// Every field is `#[serde(default)]`: providers disagree about which counts
 /// they return, and a missing count should read as zero rather than fail the
 /// whole response.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Usage {
-    /// Tokens consumed by the prompt.
+    /// Every input token the model saw, **including** tokens served from or
+    /// written to the prompt cache.
+    ///
+    /// Anthropic reports `input_tokens` excluding cache reads and writes;
+    /// the Anthropic provider adds them back so this field means the same
+    /// thing everywhere. It is the figure context accounting needs.
     #[serde(default)]
     pub prompt_tokens: u32,
-    /// Tokens generated in the completion.
+    /// Tokens generated in the completion, including reasoning tokens.
     #[serde(default)]
     pub completion_tokens: u32,
     /// Total tokens (prompt + completion).
     #[serde(default)]
     pub total_tokens: u32,
+    /// Prompt tokens served from the cache. A subset of `prompt_tokens`;
+    /// `None` when the provider does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u32>,
+    /// Prompt tokens written to the cache. A subset of `prompt_tokens`;
+    /// `None` when the provider does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u32>,
+    /// Tokens spent on reasoning. A subset of `completion_tokens`, **not** an
+    /// addition to it; `None` when the provider does not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u32>,
     /// What the account was actually charged for this call, in US dollars.
     ///
     /// `None` from every provider that does not report it, which is most of
@@ -510,11 +780,13 @@ pub struct Usage {
     /// table means carrying a table that drifts every time a provider
     /// repositions a model. OpenRouter returns a real charged figure when the
     /// request asks for it, so that is the one provider where this is
-    /// populated.
+    /// populated. For a figure computed locally see
+    /// [`ModelInfo::estimate_cost`](crate::ModelInfo::estimate_cost), which is
+    /// a different thing and must not be mixed into this one.
     ///
     /// Treat `None` as "unknown", never as "free": a budget that sums costs
     /// across providers is only counting the ones that told it anything.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<f64>,
 }
 
@@ -535,7 +807,7 @@ impl Usage {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens.saturating_add(completion_tokens),
-            cost: None,
+            ..Self::default()
         }
     }
 
@@ -552,6 +824,29 @@ impl Usage {
     #[must_use]
     pub fn with_cost(mut self, cost: f64) -> Self {
         self.cost = Some(cost);
+        self
+    }
+
+    /// Records cache reads and writes (both subsets of `prompt_tokens`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Usage;
+    /// let usage = Usage::from_tokens(100, 5).with_cache(80, 10);
+    /// assert_eq!(usage.cache_read_tokens, Some(80));
+    /// ```
+    #[must_use]
+    pub fn with_cache(mut self, read: u32, write: u32) -> Self {
+        self.cache_read_tokens = Some(read);
+        self.cache_write_tokens = Some(write);
+        self
+    }
+
+    /// Records reasoning tokens (a subset of `completion_tokens`).
+    #[must_use]
+    pub fn with_reasoning_tokens(mut self, tokens: u32) -> Self {
+        self.reasoning_tokens = Some(tokens);
         self
     }
 }
@@ -581,7 +876,8 @@ pub struct Choice {
     pub message: Message,
     /// Reason the generation stopped (e.g. `"stop"`, `"length"`).
     pub finish_reason: Option<String>,
-    /// Tool calls requested by the model, if any.
+    /// Tool calls requested by the model, if any. Mirrors the `ToolUse`
+    /// blocks of `message`, for callers that only want the calls.
     #[serde(default)]
     pub tool_calls: Vec<ToolCall>,
 }
@@ -709,10 +1005,10 @@ impl CompletionResponse {
     ///     usage: None,
     ///     route: None,
     /// };
-    /// assert_eq!(resp.content(), Some("Hello!"));
+    /// assert_eq!(resp.content().as_deref(), Some("Hello!"));
     /// ```
-    pub fn content(&self) -> Option<&str> {
-        self.choices.first().map(|c| c.message.content.as_str())
+    pub fn content(&self) -> Option<String> {
+        self.choices.first().map(|c| c.message.text())
     }
 
     /// Returns the assistant text of the first choice, or an empty string if
@@ -736,8 +1032,8 @@ impl CompletionResponse {
     /// };
     /// assert_eq!(resp.text(), "");
     /// ```
-    pub fn text(&self) -> &str {
-        self.content().unwrap_or("")
+    pub fn text(&self) -> String {
+        self.content().unwrap_or_default()
     }
 
     /// Returns `true` if the first choice requested any tool calls.
@@ -822,11 +1118,24 @@ impl CompletionResponse {
     /// };
     ///
     /// let msg = resp.to_assistant_message();
-    /// assert_eq!(msg.content, "Checking.");
-    /// assert_eq!(msg.tool_calls[0].id, "call_1");
+    /// assert_eq!(msg.text(), "Checking.");
+    /// assert_eq!(msg.tool_calls().next().unwrap().id, "call_1");
     /// ```
     pub fn to_assistant_message(&self) -> Message {
-        Message::assistant_with_tools(self.text(), self.tool_calls().to_vec())
+        let Some(choice) = self.choices.first() else {
+            return Message::assistant("");
+        };
+        // Providers put every block, in order, on the message. A response
+        // built by hand may list calls only in `Choice::tool_calls`; add the
+        // ones the message lacks so the replayed turn always names them.
+        let mut msg = choice.message.clone();
+        msg.role = Role::Assistant;
+        for call in &choice.tool_calls {
+            if !msg.tool_calls().any(|c| c.id == call.id) {
+                msg.content.push(ContentBlock::tool_use(call.clone()));
+            }
+        }
+        msg
     }
 }
 
@@ -836,16 +1145,19 @@ impl CompletionResponse {
 /// is an unparsed partial string rather than a [`Value`]. Fragments belonging
 /// to the same call share an `index`; feed them to a
 /// [`StreamAccumulator`] to reassemble complete [`ToolCall`]s.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ToolCallDelta {
     /// Position of this tool call within the message, used to correlate
     /// fragments across chunks.
     pub index: u32,
     /// Provider-assigned call identifier. Sent once, on the first fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// Tool name. Sent once, on the first fragment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Partial JSON text to append to this call's arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
 }
 
@@ -863,18 +1175,26 @@ pub struct ToolCallDelta {
 /// assert_eq!(chunk.delta, "Hello");
 /// assert!(chunk.finish_reason.is_none());
 /// ```
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct StreamChunk {
     /// Incremental text fragment for this chunk. Empty for chunks that carry
     /// only tool-call or metadata updates.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub delta: String,
     /// Set when the stream is complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
     /// Partial tool calls advanced by this chunk.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallDelta>,
     /// Token usage, when the provider reports it. Typically present only on
     /// the final chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// A fragment of the model's reasoning. Show it as it streams, collapsed;
+    /// the accumulator also keeps it as a `Thinking` block for replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingDelta>,
 }
 
 impl StreamChunk {
@@ -912,6 +1232,7 @@ impl StreamChunk {
             && self.finish_reason.is_none()
             && self.tool_calls.is_empty()
             && self.usage.is_none()
+            && self.thinking.is_none()
     }
 }
 
@@ -941,6 +1262,25 @@ pub struct StreamAccumulator {
     usage: Option<Usage>,
     /// Partial tool calls keyed by stream index, in first-seen order.
     tool_calls: Vec<(u32, PartialToolCall)>,
+    /// Block order: each block's first appearance, so thinking, text and tool
+    /// calls come out in the order the model produced them.
+    slots: Vec<Slot>,
+}
+
+/// A position in the assembled message.
+#[derive(Debug, Clone)]
+enum Slot {
+    Text(String),
+    Thinking {
+        index: u32,
+        text: String,
+        signature: Option<String>,
+    },
+    Redacted {
+        index: u32,
+        data: String,
+    },
+    Tool(u32),
 }
 
 /// A tool call being assembled from streamed fragments.
@@ -976,7 +1316,17 @@ impl StreamAccumulator {
     /// assert_eq!(acc.text(), "partial");
     /// ```
     pub fn push(&mut self, chunk: &StreamChunk) {
-        self.text.push_str(&chunk.delta);
+        if let Some(thinking) = &chunk.thinking {
+            self.push_thinking(thinking);
+        }
+
+        if !chunk.delta.is_empty() {
+            self.text.push_str(&chunk.delta);
+            match self.slots.last_mut() {
+                Some(Slot::Text(text)) => text.push_str(&chunk.delta),
+                _ => self.slots.push(Slot::Text(chunk.delta.clone())),
+            }
+        }
 
         if chunk.finish_reason.is_some() {
             self.finish_reason = chunk.finish_reason.clone();
@@ -989,6 +1339,7 @@ impl StreamAccumulator {
             let entry = match self.tool_calls.iter_mut().find(|(i, _)| *i == delta.index) {
                 Some((_, call)) => call,
                 None => {
+                    self.slots.push(Slot::Tool(delta.index));
                     self.tool_calls
                         .push((delta.index, PartialToolCall::default()));
                     &mut self.tool_calls.last_mut().expect("just pushed").1
@@ -1004,6 +1355,91 @@ impl StreamAccumulator {
                 entry.arguments.push_str(args);
             }
         }
+    }
+
+    fn push_thinking(&mut self, delta: &ThinkingDelta) {
+        let index = delta.index();
+        let found = self.slots.iter().position(|slot| match (slot, delta) {
+            (Slot::Thinking { index: i, .. }, ThinkingDelta::Text { .. })
+            | (Slot::Thinking { index: i, .. }, ThinkingDelta::Signature { .. }) => *i == index,
+            (Slot::Redacted { index: i, .. }, ThinkingDelta::Redacted { .. }) => *i == index,
+            _ => false,
+        });
+        match delta {
+            ThinkingDelta::Text { text, .. }
+            | ThinkingDelta::Signature {
+                signature: text, ..
+            } => {
+                let pos = found.unwrap_or_else(|| {
+                    self.slots.push(Slot::Thinking {
+                        index,
+                        text: String::new(),
+                        signature: None,
+                    });
+                    self.slots.len() - 1
+                });
+                if let Slot::Thinking {
+                    text: acc,
+                    signature,
+                    ..
+                } = &mut self.slots[pos]
+                {
+                    match delta {
+                        ThinkingDelta::Signature { .. } => {
+                            signature.get_or_insert_with(String::new).push_str(text)
+                        }
+                        _ => acc.push_str(text),
+                    }
+                }
+            }
+            ThinkingDelta::Redacted { data, .. } => match found {
+                Some(pos) => {
+                    if let Slot::Redacted { data: acc, .. } = &mut self.slots[pos] {
+                        acc.push_str(data);
+                    }
+                }
+                None => self.slots.push(Slot::Redacted {
+                    index,
+                    data: data.clone(),
+                }),
+            },
+        }
+    }
+
+    /// Returns the content blocks assembled so far, in the order the model
+    /// produced them: thinking, text and tool calls interleaved as streamed.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{ContentBlock, StreamAccumulator, StreamChunk};
+    ///
+    /// let mut acc = StreamAccumulator::new();
+    /// acc.push(&StreamChunk::text("hi"));
+    /// assert_eq!(acc.blocks(), vec![ContentBlock::text("hi")]);
+    /// ```
+    pub fn blocks(&self) -> Vec<ContentBlock> {
+        let calls = self.tool_calls();
+        self.slots
+            .iter()
+            .filter_map(|slot| match slot {
+                Slot::Text(text) => Some(ContentBlock::text(text.clone())),
+                Slot::Thinking {
+                    text, signature, ..
+                } => Some(ContentBlock::Thinking {
+                    text: text.clone(),
+                    signature: signature.clone(),
+                }),
+                Slot::Redacted { data, .. } => {
+                    Some(ContentBlock::RedactedThinking { data: data.clone() })
+                }
+                Slot::Tool(index) => self
+                    .tool_calls
+                    .iter()
+                    .position(|(i, _)| i == index)
+                    .map(|pos| ContentBlock::tool_use(calls[pos].clone())),
+            })
+            .collect()
     }
 
     /// Returns the text accumulated so far.
@@ -1109,12 +1545,13 @@ impl StreamAccumulator {
     /// ```
     pub fn into_response(self) -> CompletionResponse {
         let tool_calls = self.tool_calls();
+        let message = Message::assistant_blocks(self.blocks());
         CompletionResponse {
             id: None,
             model: None,
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant(self.text),
+                message,
                 finish_reason: self.finish_reason,
                 tool_calls,
             }],
@@ -1142,22 +1579,22 @@ mod tests {
     fn tool_result_carries_call_id() {
         let msg = Message::tool_result("call_1", "72F");
         assert_eq!(msg.role, "tool");
-        assert_eq!(msg.content, "72F");
-        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
-        assert!(msg.tool_calls.is_empty());
+        assert_eq!(msg.text(), "72F");
+        assert_eq!(msg.tool_result_id(), Some("call_1"));
+        assert_eq!(msg.tool_calls().count(), 0);
         assert!(msg.is_tool_result());
     }
 
     #[test]
     fn tool_result_json_stringifies_structured_content() {
         let msg = Message::tool_result_json("c", &serde_json::json!({"a": 1}));
-        assert_eq!(msg.content, r#"{"a":1}"#);
+        assert_eq!(msg.text(), r#"{"a":1}"#);
     }
 
     #[test]
     fn tool_result_json_passes_strings_through_unquoted() {
         let msg = Message::tool_result_json("c", &serde_json::json!("plain"));
-        assert_eq!(msg.content, "plain");
+        assert_eq!(msg.text(), "plain");
     }
 
     #[test]
@@ -1171,25 +1608,27 @@ mod tests {
             }],
         );
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.tool_calls.len(), 1);
-        assert!(msg.tool_call_id.is_none());
+        assert_eq!(msg.tool_calls().count(), 1);
+        assert!(msg.tool_result_id().is_none());
         assert!(!msg.is_tool_result());
     }
 
     #[test]
     fn plain_message_serializes_without_tool_fields() {
-        // The tool fields are additive: a text-only message must produce
-        // exactly the JSON it did before they existed, or every provider body
-        // gains three null keys.
+        // Optional fields are skipped when unset, so a text message carries
+        // nothing but its role and blocks.
         let json = serde_json::to_value(Message::user("hi")).unwrap();
-        assert_eq!(json, serde_json::json!({"role": "user", "content": "hi"}));
+        assert_eq!(
+            json,
+            serde_json::json!({"role": "user", "content": [{"type": "text", "text": "hi"}]})
+        );
     }
 
     #[test]
     fn tool_message_round_trips_through_serde() {
         let msg = Message::tool_result("call_1", "ok").with_name("get_weather");
         let json = serde_json::to_value(&msg).unwrap();
-        assert_eq!(json["tool_call_id"], "call_1");
+        assert_eq!(json["content"][0]["tool_use_id"], "call_1");
         assert_eq!(json["name"], "get_weather");
         assert_eq!(serde_json::from_value::<Message>(json).unwrap(), msg);
     }
@@ -1215,9 +1654,9 @@ mod tests {
 
         let msg = resp.to_assistant_message();
         assert_eq!(msg.role, "assistant");
-        assert_eq!(msg.content, "checking");
-        assert_eq!(msg.tool_calls.len(), 1);
-        assert_eq!(msg.tool_calls[0].id, "call_1");
+        assert_eq!(msg.text(), "checking");
+        assert_eq!(msg.tool_calls().count(), 1);
+        assert_eq!(msg.tool_calls().next().unwrap().id, "call_1");
     }
 
     #[test]
@@ -1251,7 +1690,7 @@ mod tests {
             usage: None,
             route: None,
         };
-        assert_eq!(resp.content(), Some("hello"));
+        assert_eq!(resp.content().as_deref(), Some("hello"));
         assert_eq!(resp.text(), "hello");
         assert!(!resp.tool_use());
         assert!(resp.tool_calls().is_empty());
@@ -1479,5 +1918,154 @@ mod tests {
         let usage: Usage = serde_json::from_value(serde_json::json!({"total_tokens": 7})).unwrap();
         assert_eq!(usage.total_tokens, 7);
         assert_eq!(usage.prompt_tokens, 0);
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_old_message_shape_still_deserializes() {
+        let text: Message =
+            serde_json::from_value(json!({"role": "user", "content": "hi"})).unwrap();
+        assert_eq!(text, Message::user("hi"));
+
+        let tool: Message = serde_json::from_value(json!({
+            "role": "tool", "content": "72F", "tool_call_id": "c1", "name": "w"
+        }))
+        .unwrap();
+        assert_eq!(tool, Message::tool_result("c1", "72F").with_name("w"));
+
+        let assistant: Message = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "checking",
+            "tool_calls": [{"id": "c1", "name": "w", "input": {"a": 1}}]
+        }))
+        .unwrap();
+        assert_eq!(assistant.text(), "checking");
+        assert_eq!(
+            assistant.tool_calls().next().unwrap().input,
+            json!({"a": 1})
+        );
+    }
+
+    #[test]
+    fn the_new_shape_round_trips() {
+        let msg = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                text: "t".into(),
+                signature: Some("s".into()),
+            },
+            ContentBlock::text("hi"),
+            ContentBlock::image_base64("image/png", [1u8]),
+        ])
+        .with_cache(CacheHint::Ephemeral);
+        let back: Message = serde_json::from_value(serde_json::to_value(&msg).unwrap()).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn an_unknown_role_is_an_error() {
+        assert!(
+            serde_json::from_value::<Message>(json!({"role": "robot", "content": "x"})).is_err()
+        );
+    }
+
+    #[test]
+    fn the_accumulator_keeps_blocks_in_arrival_order() {
+        let mut acc = StreamAccumulator::new();
+        acc.push(&StreamChunk {
+            thinking: Some(ThinkingDelta::Text {
+                index: 0,
+                text: "a".into(),
+            }),
+            ..Default::default()
+        });
+        acc.push(&StreamChunk::text("hello "));
+        acc.push(&StreamChunk {
+            tool_calls: vec![ToolCallDelta {
+                index: 0,
+                id: Some("t".into()),
+                name: Some("n".into()),
+                arguments: Some("{}".into()),
+            }],
+            ..Default::default()
+        });
+        acc.push(&StreamChunk::text("again"));
+        acc.push(&StreamChunk {
+            thinking: Some(ThinkingDelta::Text {
+                index: 0,
+                text: "b".into(),
+            }),
+            ..Default::default()
+        });
+
+        let blocks = acc.blocks();
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(
+            blocks[0],
+            ContentBlock::Thinking {
+                text: "ab".into(),
+                signature: None
+            }
+        );
+        assert_eq!(blocks[1], ContentBlock::text("hello "));
+        assert!(matches!(blocks[2], ContentBlock::ToolUse { .. }));
+        assert_eq!(blocks[3], ContentBlock::text("again"));
+        assert_eq!(acc.text(), "hello again");
+    }
+
+    #[test]
+    fn a_hand_built_response_still_replays_its_tool_calls() {
+        let resp = CompletionResponse {
+            id: None,
+            model: None,
+            choices: vec![Choice {
+                index: 0,
+                message: Message::assistant("x"),
+                finish_reason: None,
+                tool_calls: vec![ToolCall {
+                    id: "a".into(),
+                    name: "n".into(),
+                    input: json!({}),
+                }],
+            }],
+            usage: None,
+            route: None,
+        };
+        let msg = resp.to_assistant_message();
+        assert_eq!(msg.tool_calls().count(), 1);
+        // And a message that already holds the call does not gain a second.
+        let again = CompletionResponse {
+            choices: vec![Choice {
+                message: msg,
+                ..resp.choices[0].clone()
+            }],
+            ..resp
+        };
+        assert_eq!(again.to_assistant_message().tool_calls().count(), 1);
+    }
+
+    #[test]
+    fn thinking_deltas_make_a_chunk_non_empty() {
+        let chunk = StreamChunk {
+            thinking: Some(ThinkingDelta::Signature {
+                index: 0,
+                signature: "s".into(),
+            }),
+            ..Default::default()
+        };
+        assert!(!chunk.is_empty());
+    }
+
+    #[test]
+    fn usage_serializes_without_unset_counts() {
+        let json = serde_json::to_value(Usage::from_tokens(1, 2)).unwrap();
+        assert_eq!(
+            json,
+            json!({"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3})
+        );
     }
 }

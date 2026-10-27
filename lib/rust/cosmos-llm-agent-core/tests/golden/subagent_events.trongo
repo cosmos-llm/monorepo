@@ -1,0 +1,14 @@
+[
+  {
+    :agent "explore"
+    :call_id "toolu_1"
+    :event "subagent"
+    :inner {:text "looking" :type "text_delta"}
+  }
+  {
+    :agent "general"
+    :call_id "toolu_1/toolu_2"
+    :event "subagent"
+    :inner {:call_id "toolu_9" :type "tool_started"}
+  }
+]

@@ -1,0 +1,5 @@
+{
+  :max_bytes 12000
+  :max_lines 500
+  :strategy {:head_ratio 0.25 :type "head_tail"}
+}

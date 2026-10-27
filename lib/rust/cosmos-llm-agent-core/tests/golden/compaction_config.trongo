@@ -1,0 +1,4 @@
+[
+  {:chunk_tokens 60000 :enabled true :keep_turns 2 :model nil :recent_user_tokens 20000 :strategy "summarize" :summary_max_tokens 4096 :tail_fraction 0.25 :tool_result_chars 2000}
+  {:chunk_tokens 60000 :enabled true :keep_turns 3 :model "claude-haiku-4" :recent_user_tokens 20000 :strategy "summarize" :summary_max_tokens 4096 :tail_fraction 0.25 :tool_result_chars 2000}
+]

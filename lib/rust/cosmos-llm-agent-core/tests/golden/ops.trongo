@@ -1,0 +1,39 @@
+[
+  {
+    :blocks [
+      {:text "fix the bug" :type "text"}
+    ]
+    :op "user_input"
+  }
+  {:op "interrupt"}
+  {
+    :call_id "call_1"
+    :decision {:type "allow"}
+    :op "approve"
+  }
+  {
+    :call_id "call_2"
+    :decision {
+      :scope {:name "bash" :type "tool"}
+      :type "allow_always"
+    }
+    :op "approve"
+    :remember true
+  }
+  {
+    :call_id "call_3"
+    :decision {:reason "not that file" :type "deny"}
+    :op "approve"
+  }
+  {:model "claude-sonnet-4" :op "set_model"}
+  {:mode "auto_edit" :op "set_mode"}
+  {
+    :op "set_reasoning"
+    :reasoning {:effort "high" :type "effort"}
+  }
+  {:instructions "keep the parser notes" :op "compact"}
+  {:op "undo" :turn 2}
+  {:message 5 :op "truncate_to"}
+  {:args "src/lib.rs" :name "review" :op "run_command"}
+  {:op "shutdown"}
+]

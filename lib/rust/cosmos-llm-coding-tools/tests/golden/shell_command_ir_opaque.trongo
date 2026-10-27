@@ -1,0 +1,12 @@
+{
+  :items [
+    {
+      :argv [
+        {:text "ls"}
+      ]
+      :type "simple"
+    }
+    {:reason "`if` compound command" :source "if true; then rm x; fi" :type "opaque"}
+  ]
+  :type "sequence"
+}

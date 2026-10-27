@@ -1,0 +1,183 @@
+{
+  "type": "sequence",
+  "items": [
+    {
+      "type": "chain",
+      "first": {
+        "type": "simple",
+        "assignments": [
+          {
+            "name": "FOO",
+            "value": {
+              "text": "1"
+            }
+          }
+        ],
+        "argv": [
+          {
+            "text": "cargo"
+          },
+          {
+            "text": "test"
+          }
+        ]
+      },
+      "rest": [
+        {
+          "op": "and",
+          "command": {
+            "type": "simple",
+            "argv": [
+              {
+                "text": "rm"
+              },
+              {
+                "text": "-rf"
+              },
+              {
+                "text": "~",
+                "expansions": [
+                  {
+                    "type": "tilde"
+                  }
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "op": "or",
+          "command": {
+            "type": "simple",
+            "argv": [
+              {
+                "text": "echo"
+              },
+              {
+                "text": "failed: $?",
+                "expansions": [
+                  {
+                    "type": "variable",
+                    "name": "?"
+                  }
+                ]
+              }
+            ],
+            "redirects": [
+              {
+                "fd": 2,
+                "op": "dup_out",
+                "target": {
+                  "text": "1"
+                }
+              },
+              {
+                "op": "write",
+                "target": {
+                  "text": "/tmp/log"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "type": "background",
+      "command": {
+        "type": "pipeline",
+        "commands": [
+          {
+            "type": "subshell",
+            "command": {
+              "type": "sequence",
+              "items": [
+                {
+                  "type": "simple",
+                  "argv": [
+                    {
+                      "text": "cd"
+                    },
+                    {
+                      "text": "sub"
+                    }
+                  ]
+                },
+                {
+                  "type": "simple",
+                  "argv": [
+                    {
+                      "text": "ls"
+                    },
+                    {
+                      "text": "*.rs",
+                      "glob": true
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "type": "simple",
+            "argv": [
+              {
+                "text": "wc"
+              },
+              {
+                "text": "-l"
+              }
+            ]
+          }
+        ],
+        "negated": false
+      }
+    },
+    {
+      "type": "pipeline",
+      "commands": [
+        {
+          "type": "simple",
+          "argv": [
+            {
+              "text": "cat"
+            }
+          ],
+          "redirects": [
+            {
+              "op": "here_doc",
+              "target": {
+                "text": "EOF"
+              },
+              "body": {
+                "text": "$(id)\n",
+                "expansions": [
+                  {
+                    "type": "command_substitution",
+                    "command": {
+                      "type": "simple",
+                      "argv": [
+                        {
+                          "text": "id"
+                        }
+                      ]
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "type": "simple",
+          "argv": [
+            {
+              "text": "sh"
+            }
+          ]
+        }
+      ],
+      "negated": false
+    }
+  ]
+}

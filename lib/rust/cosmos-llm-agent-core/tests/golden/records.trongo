@@ -1,0 +1,53 @@
+[
+  {
+    :cwd "/work/repo"
+    :id "67e55044-10b1-426f-9247-bb680e5fe0c8"
+    :model "claude-sonnet-4"
+    :parent {:at 3 :session "11111111-2222-4333-8444-555555555555"}
+    :started_at "2026-10-27T14:03:11Z"
+    :type "session_start"
+    :v 1
+  }
+  {
+    :id 1
+    :message {
+      :content [
+        {:text "hello" :type "text"}
+      ]
+      :role "user"
+    }
+    :type "message"
+  }
+  {
+    :id 2
+    :message {
+      :content [
+        {:text "hi there" :type "text"}
+      ]
+      :role "assistant"
+    }
+    :type "message"
+    :usage {:cache_read_tokens 0 :cache_write_tokens 0 :completion_tokens 3 :prompt_tokens 10 :reasoning_tokens 0 :steps 1 :total_tokens 13}
+  }
+  {
+    :call_id "call_1"
+    :display {:exit_code 0}
+    :type "tool_outcome"
+  }
+  {
+    :except [3]
+    :replaces {:end 5 :start 1}
+    :summary 6
+    :type "compaction"
+  }
+  {:model "gpt-5" :type "model_changed"}
+  {:after 4 :type "truncated"}
+  {
+    :files [
+      {:after "cd34" :before "ab12" :path "src/lib.rs"}
+      {:after "ef56" :path "new.rs"}
+    ]
+    :turn 1
+    :type "file_changes"
+  }
+]

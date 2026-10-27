@@ -1,0 +1,19 @@
+[
+  {
+    :allowed_tools []
+    :args nil
+    :description ""
+    :model nil
+    :name "review"
+    :prompt "Review the diff."
+  }
+  {
+    :allowed_tools ["read" "grep" "bash"]
+    :args "[focus]"
+    :description "Review the staged diff"
+    :layer "project"
+    :model "claude-sonnet-5-5"
+    :name "db:migrate"
+    :prompt "Run the migration for \$ARGUMENTS"
+  }
+]

@@ -1,0 +1,30 @@
+[
+  {
+    "type": "allow"
+  },
+  {
+    "type": "allow_always",
+    "scope": {
+      "type": "tool",
+      "name": "shell"
+    }
+  },
+  {
+    "type": "allow_always",
+    "scope": {
+      "type": "path",
+      "name": "edit",
+      "prefix": "src"
+    }
+  },
+  {
+    "type": "deny",
+    "reason": "not now"
+  },
+  {
+    "type": "deny"
+  },
+  {
+    "type": "abort"
+  }
+]

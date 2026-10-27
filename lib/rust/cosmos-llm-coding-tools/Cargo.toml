@@ -1,0 +1,40 @@
+[package]
+name = "cosmos-llm-coding-tools"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Coding-agent tools for LLM agents: disk filesystem, edit, file tracking, search, shell"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-coding-tools"
+readme = "README.md"
+keywords = ["llm", "ai", "tool", "agent", "coding"]
+categories = ["development-tools"]
+
+[features]
+default = ["trongo"]
+# `from_trongo` / `to_trongo` for the IR types, and the trongo golden files.
+# The IR types themselves are plain serde and never depend on this.
+trongo = ["dep:trongoscript"]
+
+[dependencies]
+cosmos-llm-tool = { path = "../cosmos-llm-rust-tool" }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+regex = "1"
+ignore = "0.4"
+globset = "0.4"
+similar = "2"
+sha2 = "0.10"
+tempfile = "3"
+nucleo-matcher = "0.3"
+trongoscript = { version = "0.1", optional = true }
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "process", "io-util"] }
+tokio-util = { version = "0.7", default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

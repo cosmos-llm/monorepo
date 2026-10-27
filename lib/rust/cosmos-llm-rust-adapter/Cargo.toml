@@ -1,0 +1,33 @@
+[package]
+name = "cosmos-llm-adapter"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Render LLM signatures into chat messages and parse replies back into typed values"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-adapter"
+readme = "README.md"
+keywords = ["llm", "ai", "prompt", "signature", "parsing"]
+categories = ["text-processing"]
+
+[features]
+default = []
+# The `cosmos-llm-adapter` binary and the `cli` module behind it. Off by
+# default so that crates building on adapters do not compile an argument
+# parser they never call. Install with `cargo install --features cli`.
+cli = ["dep:clap"]
+
+[dependencies]
+cosmos-llm-registry = { path = "../cosmos-llm-rust-registry" }
+cosmos-llm-signature = { path = "../cosmos-llm-rust-signature", default-features = false }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# Capped below 4.6, which raised its MSRV to 1.85.
+clap = { version = ">=4.5, <4.6", features = ["derive"], optional = true }
+
+[[bin]]
+name = "cosmos-llm-adapter"
+path = "src/main.rs"
+required-features = ["cli"]

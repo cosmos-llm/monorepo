@@ -1,0 +1,41 @@
+[package]
+name = "cosmos-llm-evaluate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Score LLM programs against labeled devsets, and verify quoted evidence"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-evaluate"
+readme = "README.md"
+keywords = ["llm", "ai", "evaluation", "metrics", "grounding"]
+categories = ["development-tools::testing"]
+
+[features]
+default = []
+# The `cosmos-llm-evaluate` binary and the `cli` module behind it. Off by
+# default so that crates scoring programs do not compile an argument parser.
+# Install with `cargo install --features cli`.
+cli = ["dep:clap"]
+
+[dependencies]
+cosmos-llm-registry = { path = "../cosmos-llm-rust-registry" }
+cosmos-llm-example = { path = "../cosmos-llm-rust-example", default-features = false }
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# Runtime-agnostic: the evaluator only needs to poll futures concurrently, and
+# choosing a runtime is the caller's decision.
+futures-util = { version = "0.3", default-features = false, features = ["std", "alloc"] }
+unicode-normalization = "0.1"
+# Capped below 4.6, which raised its MSRV to 1.85.
+clap = { version = ">=4.5, <4.6", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+tokio-test = "0.4"
+
+[[bin]]
+name = "cosmos-llm-evaluate"
+path = "src/main.rs"
+required-features = ["cli"]

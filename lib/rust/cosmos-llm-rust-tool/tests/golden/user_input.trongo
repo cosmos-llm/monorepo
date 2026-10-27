@@ -1,0 +1,6 @@
+{
+  :content [
+    {:text "fix the build" :type "text"}
+    {:text "it fails on CI" :type "text"}
+  ]
+}

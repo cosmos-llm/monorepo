@@ -1,0 +1,10 @@
+{
+  "command": "cd sub && cargo test",
+  "description": "Run the tests in sub",
+  "cwd": ".",
+  "status": "exited",
+  "exit_code": 101,
+  "duration_ms": 4210,
+  "new_cwd": "sub",
+  "output_bytes": 1834
+}

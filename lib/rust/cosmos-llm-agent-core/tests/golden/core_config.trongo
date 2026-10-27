@@ -1,0 +1,22 @@
+[
+  {
+    :compaction {:chunk_tokens 60000 :enabled true :keep_turns 2 :model nil :recent_user_tokens 20000 :strategy "summarize" :summary_max_tokens 4096 :tail_fraction 0.25 :tool_result_chars 2000}
+    :context {:compact_at 0.85 :reserve_output nil :window 100000}
+    :cwd nil
+    :event_buffer 1024
+    :instructions true
+    :max_steps 50
+    :model "claude-sonnet-4"
+    :models []
+    :permissions {
+      :allow []
+      :deny []
+      :edit_tools ["write" "edit" "multi_edit"]
+      :mode "auto_edit"
+      :shell_tools ["bash" "shell"]
+    }
+    :reasoning nil
+    :sessions {:dir nil :enabled true :retention_days nil}
+    :system_prompt nil
+  }
+]

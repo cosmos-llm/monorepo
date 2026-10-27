@@ -1,0 +1,26 @@
+{
+  "sections": [
+    {
+      "kind": "base",
+      "content": [{ "type": "text", "text": "You are a coding agent." }],
+      "stability": "static"
+    },
+    {
+      "kind": "tool_guidance",
+      "content": [{ "type": "text", "text": "Prefer read before edit." }],
+      "stability": "static"
+    },
+    {
+      "kind": "instructions",
+      "source": "/repo/AGENTS.md",
+      "content": [{ "type": "text", "text": "Instructions from /repo/AGENTS.md:\n\nRun cargo test." }],
+      "cache": { "type": "ephemeral" },
+      "stability": "session"
+    },
+    {
+      "kind": "environment",
+      "content": [{ "type": "text", "text": "<environment>\nWorking directory: /repo\n</environment>" }],
+      "stability": "session"
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+[
+  {
+    "op": "user_input",
+    "blocks": [
+      {
+        "type": "text",
+        "text": "fix the bug"
+      }
+    ]
+  },
+  {
+    "op": "interrupt"
+  },
+  {
+    "op": "approve",
+    "call_id": "call_1",
+    "decision": {
+      "type": "allow"
+    }
+  },
+  {
+    "op": "approve",
+    "call_id": "call_2",
+    "decision": {
+      "type": "allow_always",
+      "scope": {
+        "type": "tool",
+        "name": "bash"
+      }
+    },
+    "remember": true
+  },
+  {
+    "op": "approve",
+    "call_id": "call_3",
+    "decision": {
+      "type": "deny",
+      "reason": "not that file"
+    }
+  },
+  {
+    "op": "set_model",
+    "model": "claude-sonnet-4"
+  },
+  {
+    "op": "set_mode",
+    "mode": "auto_edit"
+  },
+  {
+    "op": "set_reasoning",
+    "reasoning": {
+      "type": "effort",
+      "effort": "high"
+    }
+  },
+  {
+    "op": "compact",
+    "instructions": "keep the parser notes"
+  },
+  {
+    "op": "undo",
+    "turn": 2
+  },
+  {
+    "op": "truncate_to",
+    "message": 5
+  },
+  {
+    "op": "run_command",
+    "name": "review",
+    "args": "src/lib.rs"
+  },
+  {
+    "op": "shutdown"
+  }
+]

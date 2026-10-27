@@ -1,0 +1,83 @@
+[
+  {:context_window 200000 :cwd "/work/repo" :event "session_configured" :log_path "/data/sessions/abc/s.jsonl" :mode "ask" :model "claude-sonnet-4" :protocol 1 :session_id "67e55044-10b1-426f-9247-bb680e5fe0c8"}
+  {
+    :event "history_loaded"
+    :items [
+      {
+        :id 1
+        :in_context true
+        :message {
+          :content [
+            {:text "hi" :type "text"}
+          ]
+          :role "user"
+        }
+        :type "message"
+      }
+    ]
+  }
+  {:event "agent" :text "Hello" :type "text_delta"}
+  {
+    :call_id "call_1"
+    :event "agent"
+    :result {
+      :content [
+        {:text "ok" :type "text"}
+      ]
+      :display {:lines 3}
+      :is_error false
+    }
+    :type "tool_finished"
+  }
+  {
+    :event "agent"
+    :stop {:type "end_turn"}
+    :turn 1
+    :type "turn_finished"
+  }
+  {
+    :call_id "call_2"
+    :event "approval_requested"
+    :hints {
+      :destructive true
+      :paths ["src/lib.rs"]
+      :read_only false
+    }
+    :input {:file_path "src/lib.rs"}
+    :preview {:diff "@@ -1 +1 @@"}
+    :tool "edit"
+  }
+  {:event "context_usage" :pressure "ok" :used 1280 :window 200000}
+  {:event "compaction_started" :reason "threshold"}
+  {:after 12000 :before 160000 :event "compaction_finished"}
+  {
+    :event "turn_diff"
+    :files [
+      {
+        :added 0
+        :binary true
+        :hunks []
+        :kind "created"
+        :path "logo.png"
+        :removed 0
+      }
+    ]
+  }
+  {
+    :event "undone"
+    :reverted ["a.rs"]
+    :skipped ["b.rs"]
+    :turn 2
+  }
+  {:event "model_changed" :model "gpt-5"}
+  {:event "mode_changed" :mode "full_auto"}
+  {
+    :event "run_finished"
+    :reason {:type "finished"}
+    :steps 3
+    :usage {:cache_read_tokens 0 :cache_write_tokens 0 :completion_tokens 80 :prompt_tokens 1200 :reasoning_tokens 0 :steps 1 :total_tokens 1280}
+  }
+  {:event "warning" :message "careful"}
+  {:event "error" :fatal false :message "boom"}
+  {:event "shutdown_complete"}
+]

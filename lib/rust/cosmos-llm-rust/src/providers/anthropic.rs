@@ -5,11 +5,13 @@ use std::time::Duration;
 use reqwest::Client as HttpClient;
 use serde_json::{json, Value};
 
+use crate::content::{ContentBlock, ImageSource, Role};
 use crate::error::CosmosError;
 use crate::providers::{
     map_anthropic_error, retry_after_from_headers, stream_from_response, transport_error,
     CompletionStream, Provider,
 };
+use crate::reasoning::ThinkingDelta;
 use crate::types::{
     Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, ToolCall, ToolCallDelta,
     Usage,
@@ -142,20 +144,108 @@ impl AnthropicProvider {
             })
     }
 
-    /// Splits messages into an optional system string and the remaining chat messages.
+    /// Splits messages into an optional system prompt and the remaining chat
+    /// messages.
     ///
-    /// Anthropic's API separates the system prompt from the message array.
-    fn split_system(messages: &[Message]) -> (Option<String>, Vec<&Message>) {
-        let mut system = None;
+    /// Anthropic's API separates the system prompt from the message array. The
+    /// prompt is a plain string, unless a system message carries a cache hint,
+    /// in which case it is an array of text blocks so `cache_control` has
+    /// somewhere to go. Several system messages are joined in order.
+    fn split_system(messages: &[Message]) -> (Option<Value>, Vec<&Message>) {
+        let mut blocks: Vec<Value> = Vec::new();
+        let mut cached = false;
         let mut chat = Vec::with_capacity(messages.len());
         for msg in messages {
-            if msg.role == "system" {
-                system = Some(msg.content.clone());
-            } else {
+            if msg.role != Role::System {
                 chat.push(msg);
+                continue;
             }
+            let text = msg.text();
+            if text.is_empty() {
+                continue;
+            }
+            let mut block = json!({ "type": "text", "text": text });
+            if let Some(hint) = msg.cache {
+                block["cache_control"] = hint.to_cache_control();
+                cached = true;
+            }
+            blocks.push(block);
         }
+
+        let system = if blocks.is_empty() {
+            None
+        } else if cached {
+            Some(Value::Array(blocks))
+        } else {
+            let joined: Vec<&str> = blocks.iter().filter_map(|b| b["text"].as_str()).collect();
+            Some(json!(joined.join("\n\n")))
+        };
         (system, chat)
+    }
+
+    /// Translates one content block to its wire form.
+    ///
+    /// Returns `None` for a block Anthropic cannot take: empty text, and
+    /// thinking without a signature (it can only be replayed signed).
+    fn block_to_wire(block: &ContentBlock) -> Option<Value> {
+        Some(match block {
+            ContentBlock::Text { text } if text.is_empty() => return None,
+            ContentBlock::Text { text } => json!({ "type": "text", "text": text }),
+            ContentBlock::Image { source } => match source {
+                ImageSource::Base64 { media_type, data } => json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                }),
+                ImageSource::Url { url } => json!({
+                    "type": "image",
+                    "source": { "type": "url", "url": url },
+                }),
+            },
+            ContentBlock::Thinking { text, signature } => json!({
+                "type": "thinking",
+                "thinking": text,
+                "signature": signature.as_deref()?,
+            }),
+            ContentBlock::RedactedThinking { data } => {
+                json!({ "type": "redacted_thinking", "data": data })
+            }
+            ContentBlock::ToolUse { id, name, input } => json!({
+                "type": "tool_use",
+                "id": id,
+                "name": name,
+                // Anthropic takes arguments as a native object, unlike
+                // OpenAI's JSON string.
+                "input": input,
+            }),
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                let mut wire = json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": Self::tool_result_content(content),
+                });
+                if *is_error {
+                    wire["is_error"] = json!(true);
+                }
+                wire
+            }
+        })
+    }
+
+    /// A tool result's `content`: a string when it is all text, which is what
+    /// nearly every result is, else an array of blocks.
+    fn tool_result_content(content: &[ContentBlock]) -> Value {
+        if content
+            .iter()
+            .all(|b| matches!(b, ContentBlock::Text { .. }))
+        {
+            let text: String = content.iter().filter_map(ContentBlock::as_text).collect();
+            return json!(text);
+        }
+        Value::Array(content.iter().filter_map(Self::block_to_wire).collect())
     }
 
     /// Translates messages into Anthropic's content-block format.
@@ -169,35 +259,42 @@ impl AnthropicProvider {
     ///   message holding three blocks. Consecutive tool results are therefore
     ///   merged.
     ///
-    /// An assistant turn that requested tools becomes a block array too: its
-    /// text, then one `tool_use` block per call, ids intact — the ids are what
-    /// the following `tool_result` blocks refer to.
+    /// A message's cache hint becomes `cache_control` on its last block that
+    /// can carry one (thinking blocks cannot).
     ///
     /// # Errors
     ///
     /// Returns [`CosmosError::InvalidRequest`] for a tool-role message with no
-    /// `tool_call_id`, since the result cannot be attributed to a call.
+    /// `tool_result` block, since the result cannot be attributed to a call.
     pub(crate) fn messages_to_wire(messages: &[&Message]) -> Result<Vec<Value>, CosmosError> {
         let mut wire: Vec<Value> = Vec::with_capacity(messages.len());
 
         for msg in messages {
-            if msg.is_tool_result() {
-                let id =
-                    msg.tool_call_id
-                        .as_deref()
-                        .ok_or_else(|| CosmosError::InvalidRequest {
-                            provider: PROVIDER_NAME.to_owned(),
-                            message: "tool result message has no tool_call_id; Anthropic needs \
-                                  it as tool_use_id. Build it with Message::tool_result."
-                                .to_owned(),
-                            param: Some("messages[].content[].tool_use_id".to_owned()),
-                        })?;
-                let block = json!({
-                    "type": "tool_result",
-                    "tool_use_id": id,
-                    "content": msg.content,
+            if msg.role == Role::Tool && msg.tool_result_id().is_none() {
+                return Err(CosmosError::InvalidRequest {
+                    provider: PROVIDER_NAME.to_owned(),
+                    message: "tool message has no tool_result block; Anthropic needs a \
+                              tool_use_id. Build it with Message::tool_result."
+                        .to_owned(),
+                    param: Some("messages[].content[].tool_use_id".to_owned()),
                 });
+            }
 
+            let mut blocks: Vec<Value> =
+                msg.content.iter().filter_map(Self::block_to_wire).collect();
+            if let Some(hint) = msg.cache {
+                // Thinking blocks cannot carry a breakpoint; use the last
+                // block that can.
+                let target = blocks
+                    .iter_mut()
+                    .rev()
+                    .find(|b| b["type"] != "thinking" && b["type"] != "redacted_thinking");
+                if let Some(block) = target {
+                    block["cache_control"] = hint.to_cache_control();
+                }
+            }
+
+            if msg.is_tool_result() {
                 // Fold into the preceding user message when there is one, so
                 // parallel results arrive as one turn.
                 match wire.last_mut() {
@@ -205,36 +302,53 @@ impl AnthropicProvider {
                         prev["content"]
                             .as_array_mut()
                             .expect("checked is_array")
-                            .push(block);
+                            .extend(blocks);
                     }
-                    _ => wire.push(json!({ "role": "user", "content": [block] })),
+                    _ => wire.push(json!({ "role": "user", "content": blocks })),
                 }
                 continue;
             }
 
-            if msg.tool_calls.is_empty() {
-                wire.push(json!({ "role": msg.role, "content": msg.content }));
-                continue;
-            }
-
-            let mut blocks: Vec<Value> = Vec::with_capacity(msg.tool_calls.len() + 1);
-            if !msg.content.is_empty() {
-                blocks.push(json!({ "type": "text", "text": msg.content }));
-            }
-            for call in &msg.tool_calls {
-                blocks.push(json!({
-                    "type": "tool_use",
-                    "id": call.id,
-                    "name": call.name,
-                    // Anthropic takes arguments as a native object, unlike
-                    // OpenAI's JSON string.
-                    "input": call.input,
-                }));
+            // A lone uncached text block goes as a plain string.
+            if let [block] = blocks.as_slice() {
+                if block["type"] == "text" && block.get("cache_control").is_none() {
+                    wire.push(json!({ "role": msg.role, "content": block["text"] }));
+                    continue;
+                }
             }
             wire.push(json!({ "role": msg.role, "content": blocks }));
         }
 
         Ok(wire)
+    }
+
+    /// Trims cache hints to Anthropic's limit of four breakpoints per request.
+    ///
+    /// The tool list counts as one. Hints on the earliest chat messages go
+    /// first, since the newest breakpoints are the ones the next turn reads;
+    /// system hints go last of all.
+    fn limit_cache_hints(req: &CompletionRequest) -> std::borrow::Cow<'_, [Message]> {
+        const MAX: usize = 4;
+        let used = usize::from(req.cache_tools.is_some() && req.tools.is_some());
+        let allowed = MAX.saturating_sub(used);
+        let total = req.messages.iter().filter(|m| m.cache.is_some()).count();
+        if total <= allowed {
+            return std::borrow::Cow::Borrowed(&req.messages);
+        }
+
+        let mut msgs = req.messages.clone();
+        let mut excess = total - allowed;
+        for system_pass in [false, true] {
+            for msg in msgs
+                .iter_mut()
+                .filter(|m| (m.role == Role::System) == system_pass)
+            {
+                if excess > 0 && msg.cache.take().is_some() {
+                    excess -= 1;
+                }
+            }
+        }
+        std::borrow::Cow::Owned(msgs)
     }
 
     /// Builds the JSON request body for the messages endpoint.
@@ -247,7 +361,8 @@ impl AnthropicProvider {
     /// Returns [`CosmosError::InvalidRequest`] if a message cannot be
     /// represented — see [`AnthropicProvider::messages_to_wire`].
     fn build_body(req: &CompletionRequest, stream: bool) -> Result<Value, CosmosError> {
-        let (system, chat_msgs) = Self::split_system(&req.messages);
+        let all = Self::limit_cache_hints(req);
+        let (system, chat_msgs) = Self::split_system(&all);
         let messages = Self::messages_to_wire(&chat_msgs)?;
 
         let mut body = json!({
@@ -256,8 +371,8 @@ impl AnthropicProvider {
             "max_tokens": req.max_tokens.unwrap_or(1024),
         });
 
-        if let Some(ref sys) = system {
-            body["system"] = json!(sys);
+        if let Some(sys) = system {
+            body["system"] = sys;
         }
         if let Some(t) = req.temperature {
             body["temperature"] = json!(t);
@@ -269,6 +384,10 @@ impl AnthropicProvider {
             body["stop_sequences"] = json!(stop);
         }
         if let Some(ref tools) = req.tools {
+            let mut tools = tools.clone();
+            if let (Some(hint), Some(last)) = (req.cache_tools, tools.last_mut()) {
+                last["cache_control"] = hint.to_cache_control();
+            }
             body["tools"] = json!(tools);
         }
         if let Some(ref choice) = req.tool_choice {
@@ -278,6 +397,28 @@ impl AnthropicProvider {
             body["stream"] = json!(true);
         }
 
+        // Extended thinking. Anthropic wants `max_tokens` above the budget, and
+        // rejects `temperature` and `top_p` while thinking is on, so the first
+        // is raised and the others dropped rather than failing the request.
+        if let Some(budget) = req.reasoning.and_then(|r| r.anthropic_budget()) {
+            body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            let floor = u64::from(budget) + 1024;
+            if body["max_tokens"].as_u64().unwrap_or(0) < floor {
+                body["max_tokens"] = json!(floor);
+            }
+            if let Some(map) = body.as_object_mut() {
+                map.remove("temperature");
+                map.remove("top_p");
+            }
+        }
+
+        // Caller-supplied top-level fields, last so they win. This carries
+        // what the crate has no typed builder for yet: `output_config`
+        // (effort, structured output), `thinking`, server tools' settings.
+        for (key, value) in &req.extra {
+            body[key.as_str()] = value.clone();
+        }
+
         Ok(body)
     }
 
@@ -285,45 +426,51 @@ impl AnthropicProvider {
         let id = body["id"].as_str().map(str::to_owned);
         let model = body["model"].as_str().map(str::to_owned);
 
-        // Anthropic returns `content` as an array of blocks.
-        let text = body["content"]
-            .as_array()
-            .and_then(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .map(|b| b["text"].as_str().unwrap_or("").to_owned())
-                    .reduce(|a, b| a + &b)
-            })
-            .unwrap_or_default();
+        // Anthropic returns `content` as an array of blocks. Keep every one,
+        // in order: the thinking blocks have to be replayed to Anthropic as
+        // they came.
+        let mut blocks = Vec::new();
+        for b in body["content"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let block = match b["type"].as_str().unwrap_or("") {
+                "text" => ContentBlock::text(b["text"].as_str().unwrap_or("")),
+                "thinking" => ContentBlock::Thinking {
+                    text: b["thinking"].as_str().unwrap_or("").to_owned(),
+                    signature: b["signature"].as_str().map(str::to_owned),
+                },
+                "redacted_thinking" => ContentBlock::RedactedThinking {
+                    data: b["data"].as_str().unwrap_or("").to_owned(),
+                },
+                "tool_use" => ContentBlock::ToolUse {
+                    id: b["id"].as_str().unwrap_or_default().to_owned(),
+                    name: b["name"].as_str().unwrap_or_default().to_owned(),
+                    input: b["input"].clone(),
+                },
+                // Server-tool blocks and anything newer have no model here.
+                _ => continue,
+            };
+            blocks.push(block);
+        }
 
         let finish_reason = body["stop_reason"].as_str().map(str::to_owned);
 
-        let tool_calls = body["content"]
-            .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b["type"] == "tool_use")
-                    .map(|b| ToolCall {
-                        id: b["id"].as_str().unwrap_or_default().to_owned(),
-                        name: b["name"].as_str().unwrap_or_default().to_owned(),
-                        input: b["input"].clone(),
-                    })
-                    .collect()
+        let tool_calls = blocks
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::ToolUse { id, name, input } => Some(ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                }),
+                _ => None,
             })
-            .unwrap_or_default();
+            .collect();
 
         let usage = if body["usage"].is_object() {
-            Some(Usage {
-                prompt_tokens: body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32,
-                completion_tokens: body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32,
-                total_tokens: (body["usage"]["input_tokens"].as_u64().unwrap_or(0)
-                    + body["usage"]["output_tokens"].as_u64().unwrap_or(0))
-                    as u32,
-                // Anthropic bills from token counts; it reports no per-call price.
-                cost: None,
-            })
+            let mut usage = Self::usage_at_start(&body["usage"]);
+            let out = body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+            usage.completion_tokens = out;
+            usage.total_tokens = usage.prompt_tokens.saturating_add(out);
+            Some(usage)
         } else {
             None
         };
@@ -333,13 +480,32 @@ impl AnthropicProvider {
             model,
             choices: vec![Choice {
                 index: 0,
-                message: Message::assistant(text),
+                message: Message::assistant_blocks(blocks),
                 finish_reason,
                 tool_calls,
             }],
             usage,
             route: None,
         })
+    }
+
+    /// Reads the input side of an Anthropic `usage` object.
+    ///
+    /// Anthropic's `input_tokens` excludes cache reads and writes; they are
+    /// added back so `prompt_tokens` counts every token the model saw, the
+    /// meaning it has for the other providers. Output counts are left at zero.
+    fn usage_at_start(usage: &Value) -> Usage {
+        let count = |key: &str| usage[key].as_u64().map(|n| n as u32);
+        let read = count("cache_read_input_tokens");
+        let write = count("cache_creation_input_tokens");
+        let prompt = count("input_tokens")
+            .unwrap_or(0)
+            .saturating_add(read.unwrap_or(0))
+            .saturating_add(write.unwrap_or(0));
+        let mut out = Usage::from_tokens(prompt, 0);
+        out.cache_read_tokens = read;
+        out.cache_write_tokens = write;
+        out
     }
 
     /// Classifies an error response, honouring `Retry-After` when present.
@@ -373,9 +539,9 @@ impl AnthropicProvider {
 struct StreamState {
     /// Block index → tool-call index, for blocks of type `tool_use`.
     tool_slots: Vec<(u64, u32)>,
-    /// Input tokens from `message_start`, held until the final
+    /// Input-side usage from `message_start`, held until the final
     /// `message_delta` reports output tokens.
-    prompt_tokens: Option<u32>,
+    start_usage: Option<Usage>,
 }
 
 impl StreamState {
@@ -419,16 +585,37 @@ fn parse_anthropic_event(
 
     let chunk = match value["type"].as_str().unwrap_or("") {
         "message_start" => {
-            state.prompt_tokens = value["message"]["usage"]["input_tokens"]
-                .as_u64()
-                .map(|n| n as u32);
+            state.start_usage = value["message"]["usage"]["input_tokens"]
+                .is_u64()
+                .then(|| AnthropicProvider::usage_at_start(&value["message"]["usage"]));
             return Ok(None);
         }
 
         "content_block_start" => {
             let block = &value["content_block"];
-            if block["type"] != "tool_use" {
-                return Ok(None);
+            // Thinking opens a block so the accumulator keeps its position
+            // even if no text follows.
+            match block["type"].as_str().unwrap_or("") {
+                "thinking" => {
+                    return Ok(Some(StreamChunk {
+                        thinking: Some(ThinkingDelta::Text {
+                            index: block_index as u32,
+                            text: block["thinking"].as_str().unwrap_or("").to_owned(),
+                        }),
+                        ..Default::default()
+                    }))
+                }
+                "redacted_thinking" => {
+                    return Ok(Some(StreamChunk {
+                        thinking: Some(ThinkingDelta::Redacted {
+                            index: block_index as u32,
+                            data: block["data"].as_str().unwrap_or("").to_owned(),
+                        }),
+                        ..Default::default()
+                    }))
+                }
+                "tool_use" => {}
+                _ => return Ok(None),
             }
             let slot = state.register_tool(block_index);
             StreamChunk {
@@ -463,8 +650,22 @@ fn parse_anthropic_event(
                         ..Default::default()
                     }
                 }
-                // `thinking_delta` and other block types carry no text this
-                // crate surfaces yet.
+                "thinking_delta" => StreamChunk {
+                    thinking: Some(ThinkingDelta::Text {
+                        index: block_index as u32,
+                        text: delta["thinking"].as_str().unwrap_or("").to_owned(),
+                    }),
+                    ..Default::default()
+                },
+                "signature_delta" => StreamChunk {
+                    thinking: Some(ThinkingDelta::Signature {
+                        index: block_index as u32,
+                        signature: delta["signature"].as_str().unwrap_or("").to_owned(),
+                    }),
+                    ..Default::default()
+                },
+                // Citations and other delta types carry nothing this crate
+                // surfaces yet.
                 _ => return Ok(None),
             }
         }
@@ -472,13 +673,10 @@ fn parse_anthropic_event(
         "message_delta" => {
             let output_tokens = value["usage"]["output_tokens"].as_u64().map(|n| n as u32);
             let usage = output_tokens.map(|completion_tokens| {
-                let prompt_tokens = state.prompt_tokens.unwrap_or(0);
-                Usage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    cost: None,
-                }
+                let mut usage = state.start_usage.clone().unwrap_or_default();
+                usage.completion_tokens = completion_tokens;
+                usage.total_tokens = usage.prompt_tokens.saturating_add(completion_tokens);
+                usage
             });
             StreamChunk {
                 finish_reason: value["delta"]["stop_reason"].as_str().map(str::to_owned),
@@ -596,7 +794,7 @@ mod tests {
             Message::assistant("hello"),
         ];
         let (sys, chat) = AnthropicProvider::split_system(&msgs);
-        assert_eq!(sys, Some("be helpful".into()));
+        assert_eq!(sys, Some(json!("be helpful")));
         assert_eq!(chat.len(), 2);
     }
 
@@ -629,7 +827,7 @@ mod tests {
             "usage": { "input_tokens": 8, "output_tokens": 4 }
         });
         let resp = AnthropicProvider::map_response(body).unwrap();
-        assert_eq!(resp.content(), Some("Hi there!"));
+        assert_eq!(resp.content().as_deref(), Some("Hi there!"));
         assert!(!resp.tool_use());
         assert_eq!(resp.usage.unwrap().total_tokens, 12);
     }
@@ -678,6 +876,17 @@ mod tests {
 
         let streamed = AnthropicProvider::build_body(&req, true).unwrap();
         assert_eq!(streamed["stream"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn extra_fields_are_merged_into_the_body() {
+        let req = CompletionRequest::new("claude-opus-5-5", vec![Message::user("hi")])
+            .with_extra("output_config", json!({ "effort": "high" }))
+            .with_extra("max_tokens", json!(4096));
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert_eq!(body["output_config"], json!({ "effort": "high" }));
+        // A field the provider builds itself can be overridden.
+        assert_eq!(body["max_tokens"], 4096);
     }
 
     #[test]
@@ -748,11 +957,10 @@ mod tests {
 
     #[test]
     fn wire_tool_result_without_id_fails_locally() {
-        let mut msg = Message::new("tool", "72F");
-        msg.tool_call_id = None;
+        let msg = Message::new(Role::Tool, "72F");
         let err = AnthropicProvider::messages_to_wire(&[&msg]).unwrap_err();
         assert!(
-            matches!(err, CosmosError::InvalidRequest { message: ref m, .. } if m.contains("tool_call_id"))
+            matches!(err, CosmosError::InvalidRequest { message: ref m, .. } if m.contains("tool_use_id"))
         );
     }
 
@@ -967,7 +1175,7 @@ mod tests {
     #[test]
     fn stream_ignores_unmodelled_delta_types() {
         let mut state = StreamState::default();
-        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}"#;
+        let data = r#"{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{}}}"#;
         assert!(parse_anthropic_event(&mut state, data).unwrap().is_none());
     }
 
@@ -999,5 +1207,334 @@ mod tests {
         let mut state = StreamState::default();
         let err = parse_anthropic_event(&mut state, "{oops").unwrap_err();
         assert!(matches!(err, CosmosError::Streaming { .. }));
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::content::CacheHint;
+    use crate::reasoning::{Reasoning, ReasoningEffort};
+    use crate::types::StreamAccumulator;
+
+    fn wire(msgs: &[Message]) -> Vec<Value> {
+        let refs: Vec<&Message> = msgs.iter().collect();
+        AnthropicProvider::messages_to_wire(&refs).unwrap()
+    }
+
+    #[test]
+    fn every_block_type_lowers_to_its_wire_shape() {
+        let assistant = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                text: "hmm".into(),
+                signature: Some("sig".into()),
+            },
+            ContentBlock::RedactedThinking { data: "xyz".into() },
+            ContentBlock::text("Looking."),
+            ContentBlock::ToolUse {
+                id: "t1".into(),
+                name: "read".into(),
+                input: json!({"path": "a"}),
+            },
+        ]);
+        let user = Message::user_blocks(vec![
+            ContentBlock::text("see"),
+            ContentBlock::image_base64("image/png", [1u8, 2, 3]),
+            ContentBlock::image_url("https://x/y.png"),
+        ]);
+        let result = Message::tool_result_blocks(
+            "t1",
+            vec![
+                ContentBlock::text("shot"),
+                ContentBlock::image_base64("image/png", [9u8]),
+            ],
+            true,
+        );
+        let w = wire(&[user, assistant, result]);
+
+        assert_eq!(w[0]["content"][1]["source"]["type"], "base64");
+        assert_eq!(w[0]["content"][1]["source"]["data"], "AQID");
+        assert_eq!(
+            w[0]["content"][2]["source"],
+            json!({"type": "url", "url": "https://x/y.png"})
+        );
+        assert_eq!(
+            w[1]["content"],
+            json!([
+                {"type": "thinking", "thinking": "hmm", "signature": "sig"},
+                {"type": "redacted_thinking", "data": "xyz"},
+                {"type": "text", "text": "Looking."},
+                {"type": "tool_use", "id": "t1", "name": "read", "input": {"path": "a"}},
+            ])
+        );
+        let tr = &w[2]["content"][0];
+        assert_eq!(w[2]["role"], "user");
+        assert_eq!(tr["type"], "tool_result");
+        assert_eq!(tr["is_error"], true);
+        assert_eq!(tr["content"][0]["text"], "shot");
+        assert_eq!(tr["content"][1]["type"], "image");
+    }
+
+    #[test]
+    fn unsigned_thinking_is_not_replayed() {
+        let msg = Message::assistant_blocks(vec![
+            ContentBlock::Thinking {
+                text: "x".into(),
+                signature: None,
+            },
+            ContentBlock::text("hi"),
+        ]);
+        assert_eq!(wire(&[msg])[0]["content"], json!("hi"));
+    }
+
+    #[test]
+    fn response_blocks_survive_a_replay_in_order() {
+        let body = json!({
+            "id": "msg_1",
+            "content": [
+                { "type": "thinking", "thinking": "plan", "signature": "s1" },
+                { "type": "text", "text": "Checking." },
+                { "type": "tool_use", "id": "a", "name": "one", "input": {} },
+                { "type": "tool_use", "id": "b", "name": "two", "input": {"x": 1} }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        });
+        let resp = AnthropicProvider::map_response(body).unwrap();
+        let replay = resp.to_assistant_message();
+        assert_eq!(replay.content.len(), 4);
+        assert!(replay.content[0].is_thinking());
+
+        let w = wire(&[replay]);
+        let types: Vec<&str> = w[0]["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, ["thinking", "text", "tool_use", "tool_use"]);
+        assert_eq!(w[0]["content"][0]["signature"], "s1");
+    }
+
+    #[test]
+    fn stream_with_thinking_signature_text_and_tool_use_yields_four_blocks() {
+        let events = [
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":10}}}"#,
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me "}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"think"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-1"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"enc"}}"#,
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"Reading."}}"#,
+            r#"{"type":"content_block_start","index":3,"content_block":{"type":"tool_use","id":"t1","name":"read","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":3,"delta":{"type":"input_json_delta","partial_json":"{\"p\":1}"}}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}"#,
+        ];
+        let mut state = StreamState::default();
+        let mut acc = StreamAccumulator::new();
+        for e in events {
+            if let Some(chunk) = parse_anthropic_event(&mut state, e).unwrap() {
+                acc.push(&chunk);
+            }
+        }
+        let resp = acc.into_response();
+        assert_eq!(
+            resp.choices[0].message.content,
+            vec![
+                ContentBlock::Thinking {
+                    text: "let me think".into(),
+                    signature: Some("sig-1".into())
+                },
+                ContentBlock::RedactedThinking { data: "enc".into() },
+                ContentBlock::text("Reading."),
+                ContentBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "read".into(),
+                    input: json!({"p": 1})
+                },
+            ]
+        );
+        assert_eq!(resp.usage.unwrap().total_tokens, 17);
+    }
+
+    #[test]
+    fn streamed_and_whole_responses_build_the_same_message() {
+        let whole = AnthropicProvider::map_response(json!({
+            "content": [
+                { "type": "thinking", "thinking": "ab", "signature": "s" },
+                { "type": "text", "text": "hi" }
+            ],
+            "usage": { "input_tokens": 1, "output_tokens": 1 }
+        }))
+        .unwrap();
+
+        let mut state = StreamState::default();
+        let mut acc = StreamAccumulator::new();
+        for e in [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"ab"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"s"}}"#,
+            r#"{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ] {
+            if let Some(c) = parse_anthropic_event(&mut state, e).unwrap() {
+                acc.push(&c);
+            }
+        }
+        assert_eq!(
+            acc.into_response().choices[0].message,
+            whole.choices[0].message
+        );
+    }
+
+    #[test]
+    fn effort_sets_a_budget_and_raises_max_tokens() {
+        let req = CompletionRequest::new("claude-sonnet-4-6", vec![Message::user("hi")])
+            .with_temperature(0.2)
+            .with_max_tokens(2000)
+            .with_reasoning(Reasoning::effort(ReasoningEffort::High));
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert_eq!(
+            body["thinking"],
+            json!({"type": "enabled", "budget_tokens": 24576})
+        );
+        assert!(body["max_tokens"].as_u64().unwrap() > 24576);
+        // Anthropic rejects these while thinking.
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn explicit_budget_is_floored_at_the_api_minimum() {
+        let req = CompletionRequest::new("m", vec![Message::user("hi")])
+            .with_reasoning(Reasoning::budget(10));
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert_eq!(body["thinking"]["budget_tokens"], 1024);
+        assert_eq!(body["max_tokens"], 2048);
+    }
+
+    #[test]
+    fn reasoning_off_sends_nothing() {
+        let req = CompletionRequest::new("m", vec![Message::user("hi")])
+            .with_temperature(0.2)
+            .with_reasoning(Reasoning::Off);
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("temperature").is_some());
+    }
+
+    #[test]
+    fn default_breakpoints_land_on_tools_system_and_two_messages() {
+        let mut req = CompletionRequest::new(
+            "m",
+            vec![
+                Message::system("rules"),
+                Message::user("one"),
+                Message::assistant("two"),
+                Message::user("three"),
+            ],
+        )
+        .with_tools(vec![json!({"name": "a"}), json!({"name": "b"})]);
+        crate::apply_default_cache_breakpoints(&mut req);
+
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert_eq!(
+            body["tools"][1]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(body["tools"][0].get("cache_control").is_none());
+        assert_eq!(
+            body["system"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert!(body["messages"][0]["content"].is_string()); // "one": uncached
+        assert_eq!(
+            body["messages"][1]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+        assert_eq!(
+            body["messages"][2]["content"][0]["cache_control"],
+            json!({"type": "ephemeral"})
+        );
+
+        let total = body.to_string().matches("cache_control").count();
+        assert_eq!(total, 4);
+    }
+
+    #[test]
+    fn more_than_four_breakpoints_are_trimmed_oldest_first() {
+        let mut msgs = vec![Message::system("s").with_cache(CacheHint::Ephemeral)];
+        for i in 0..6 {
+            msgs.push(Message::user(format!("m{i}")).with_cache(CacheHint::Ephemeral));
+        }
+        let req = CompletionRequest::new("m", msgs)
+            .with_tools(vec![json!({"name": "a"})])
+            .with_cache_tools(CacheHint::Ephemeral);
+        let body = AnthropicProvider::build_body(&req, false).unwrap();
+        assert_eq!(body.to_string().matches("cache_control").count(), 4);
+        // Tools and system survive; so do the newest messages.
+        assert!(body["tools"][0].get("cache_control").is_some());
+        assert!(body["system"][0].get("cache_control").is_some());
+        assert!(body["messages"][5]["content"][0]
+            .get("cache_control")
+            .is_some());
+        assert!(body["messages"][0]["content"].is_string());
+    }
+
+    #[test]
+    fn a_long_hint_sets_the_ttl_and_thinking_is_skipped() {
+        let msg = Message::assistant_blocks(vec![
+            ContentBlock::text("a"),
+            ContentBlock::Thinking {
+                text: "t".into(),
+                signature: Some("s".into()),
+            },
+        ])
+        .with_cache(CacheHint::EphemeralLong);
+        let w = wire(&[msg]);
+        assert_eq!(
+            w[0]["content"][0]["cache_control"],
+            json!({"type": "ephemeral", "ttl": "1h"})
+        );
+        assert!(w[0]["content"][1].get("cache_control").is_none());
+    }
+
+    #[test]
+    fn usage_counts_cache_reads_and_writes_as_prompt_tokens() {
+        let resp = AnthropicProvider::map_response(json!({
+            "content": [{ "type": "text", "text": "x" }],
+            "usage": {
+                "input_tokens": 5,
+                "cache_read_input_tokens": 100,
+                "cache_creation_input_tokens": 20,
+                "output_tokens": 3
+            }
+        }))
+        .unwrap();
+        let usage = resp.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 125);
+        assert_eq!(usage.cache_read_tokens, Some(100));
+        assert_eq!(usage.cache_write_tokens, Some(20));
+        assert_eq!(usage.total_tokens, 128);
+    }
+
+    #[test]
+    fn streamed_usage_is_normalized_from_message_start() {
+        let mut state = StreamState::default();
+        parse_anthropic_event(
+            &mut state,
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":4,"cache_read_input_tokens":6,"cache_creation_input_tokens":0}}}"#,
+        )
+        .unwrap();
+        let chunk = parse_anthropic_event(
+            &mut state,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":2}}"#,
+        )
+        .unwrap()
+        .unwrap();
+        let usage = chunk.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.cache_read_tokens, Some(6));
+        assert_eq!(usage.total_tokens, 12);
     }
 }

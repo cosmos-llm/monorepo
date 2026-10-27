@@ -20,12 +20,16 @@ use crate::parameter::ParameterDef;
 /// assert_eq!(s["function"]["name"], "search");
 /// ```
 pub fn openai_schema(tool: &ToolDefinition) -> Value {
+    openai_parts(&tool.name, &tool.description, &tool.parameters)
+}
+
+pub(crate) fn openai_parts(name: &str, description: &str, params: &[ParameterDef]) -> Value {
     json!({
         "type": "function",
         "function": {
-            "name": tool.name,
-            "description": tool.description,
-            "parameters": parameters_schema(tool),
+            "name": name,
+            "description": description,
+            "parameters": parameters_schema(params),
         }
     })
 }
@@ -46,10 +50,14 @@ pub fn openai_schema(tool: &ToolDefinition) -> Value {
 /// assert!(s["input_schema"].is_object());
 /// ```
 pub fn anthropic_schema(tool: &ToolDefinition) -> Value {
+    anthropic_parts(&tool.name, &tool.description, &tool.parameters)
+}
+
+pub(crate) fn anthropic_parts(name: &str, description: &str, params: &[ParameterDef]) -> Value {
     json!({
-        "name": tool.name,
-        "description": tool.description,
-        "input_schema": parameters_schema(tool),
+        "name": name,
+        "description": description,
+        "input_schema": parameters_schema(params),
     })
 }
 
@@ -67,18 +75,22 @@ pub fn anthropic_schema(tool: &ToolDefinition) -> Value {
 /// assert_eq!(s["title"], "ping");
 /// ```
 pub fn json_schema(tool: &ToolDefinition) -> Value {
-    let mut schema = parameters_schema(tool);
-    schema["title"] = json!(tool.name);
-    schema["description"] = json!(tool.description);
+    json_parts(&tool.name, &tool.description, &tool.parameters)
+}
+
+pub(crate) fn json_parts(name: &str, description: &str, params: &[ParameterDef]) -> Value {
+    let mut schema = parameters_schema(params);
+    schema["title"] = json!(name);
+    schema["description"] = json!(description);
     schema["$schema"] = json!("http://json-schema.org/draft-07/schema#");
     schema
 }
 
-fn parameters_schema(tool: &ToolDefinition) -> Value {
+fn parameters_schema(params: &[ParameterDef]) -> Value {
     let mut properties = serde_json::Map::new();
     let mut required: Vec<Value> = Vec::new();
 
-    for param in &tool.parameters {
+    for param in params {
         properties.insert(param.name.clone(), param_property(param));
         if param.required {
             required.push(json!(param.name));

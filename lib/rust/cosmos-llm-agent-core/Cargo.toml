@@ -1,0 +1,50 @@
+[package]
+name = "cosmos-llm-agent-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Agent core for coding frontends: Op/Event protocol, session log, approval policy, config"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-agent-core"
+readme = "README.md"
+keywords = ["llm", "ai", "agent", "coding", "protocol"]
+categories = ["development-tools"]
+
+[features]
+# The `exec` command line (`cli::exec_main`) and the example that wraps it.
+# Install or run with `--features cli`.
+cli = ["dep:clap", "tokio/rt-multi-thread", "tokio/signal"]
+
+[dependencies]
+cosmos-llm = { path = "../cosmos-llm-rust" }
+cosmos-llm-tool = { path = "../cosmos-llm-rust-tool", features = ["agent"] }
+cosmos-llm-coding-tools = { path = "../cosmos-llm-coding-tools" }
+cosmos-llm-context = { path = "../cosmos-llm-rust-context" }
+cosmos-llm-registry = { path = "../cosmos-llm-rust-registry" }
+# The core owns config evaluation, the sandbox and the host builtins (005), so
+# unlike the library crates it takes the evaluator unconditionally.
+trongoscript = "0.1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+tokio = { version = "1", features = ["rt", "time", "sync", "macros", "fs", "process", "io-util"] }
+tokio-util = { version = "0.7", default-features = false }
+futures-util = "0.3"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
+fs4 = { version = "0.13", features = ["sync"] }
+sha2 = "0.10"
+globset = "0.4"
+# Capped below 4.6, which raised its MSRV to 1.85.
+clap = { version = ">=4.5, <4.6", features = ["derive"], optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
+tempfile = "3"
+
+[[example]]
+name = "exec"
+path = "examples/exec.rs"
+required-features = ["cli"]

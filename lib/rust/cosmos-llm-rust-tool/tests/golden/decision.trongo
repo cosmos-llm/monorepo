@@ -1,0 +1,14 @@
+[
+  {:type "allow"}
+  {
+    :scope {:name "shell" :type "tool"}
+    :type "allow_always"
+  }
+  {
+    :scope {:name "edit" :prefix "src" :type "path"}
+    :type "allow_always"
+  }
+  {:reason "not now" :type "deny"}
+  {:type "deny"}
+  {:type "abort"}
+]

@@ -1,0 +1,5 @@
+[
+  {:type "idle"}
+  {:type "running"}
+  {:type "awaiting_approval"}
+]

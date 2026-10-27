@@ -1,0 +1,23 @@
+[
+  {
+    "name": "review",
+    "description": "",
+    "args": null,
+    "model": null,
+    "allowed_tools": [],
+    "prompt": "Review the diff."
+  },
+  {
+    "name": "db:migrate",
+    "description": "Review the staged diff",
+    "args": "[focus]",
+    "model": "claude-sonnet-5-5",
+    "allowed_tools": [
+      "read",
+      "grep",
+      "bash"
+    ],
+    "prompt": "Run the migration for $ARGUMENTS",
+    "layer": "project"
+  }
+]

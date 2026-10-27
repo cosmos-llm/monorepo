@@ -1,0 +1,55 @@
+[
+  {
+    "v": 1,
+    "result": "all tests pass",
+    "session_id": "0b9a3c9e-0000-4000-8000-000000000001",
+    "turns": 4,
+    "usage": {
+      "prompt_tokens": 1200,
+      "completion_tokens": 300,
+      "total_tokens": 1500,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "steps": 4
+    },
+    "cost": 0.0125,
+    "stop_reason": "finished"
+  },
+  {
+    "v": 1,
+    "result": "",
+    "session_id": "0b9a3c9e-0000-4000-8000-000000000002",
+    "turns": 0,
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "steps": 0
+    },
+    "stop_reason": "error",
+    "error": "provider unavailable",
+    "denied": [
+      "write {\"file_path\":\"a.txt\"}"
+    ]
+  },
+  {
+    "v": 1,
+    "result": "",
+    "session_id": "",
+    "turns": 0,
+    "usage": {
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "steps": 0
+    },
+    "stop_reason": "max_turns"
+  }
+]

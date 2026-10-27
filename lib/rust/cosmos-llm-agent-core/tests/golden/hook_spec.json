@@ -1,0 +1,34 @@
+[
+  {
+    "event": "post_tool_use",
+    "matcher": "edit|multi_edit|write",
+    "command": "cargo fmt -- $COSMOS_FILE_PATHS",
+    "timeout_ms": 10000,
+    "payload_format": "json"
+  },
+  {
+    "event": "pre_tool_use",
+    "matcher": "bash",
+    "command": "scripts/guard.sh",
+    "timeout_ms": 30000,
+    "payload_format": "json"
+  },
+  {
+    "event": "user_prompt_submit",
+    "command": "date",
+    "timeout_ms": 30000,
+    "payload_format": "json"
+  },
+  {
+    "event": "stop",
+    "command": "scripts/check-tests.sh",
+    "timeout_ms": 30000,
+    "payload_format": "trongo"
+  },
+  {
+    "event": "session_start",
+    "command": "git status --short",
+    "timeout_ms": 30000,
+    "payload_format": "json"
+  }
+]

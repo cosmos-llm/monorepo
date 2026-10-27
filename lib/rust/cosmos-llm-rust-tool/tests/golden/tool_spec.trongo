@@ -1,0 +1,15 @@
+{
+  :description "Read a file"
+  :hints {:destructive false :read_only true}
+  :name "read"
+  :output_limit {
+    :max_bytes 30000
+    :max_lines 500
+    :strategy {:type "head"}
+  }
+  :parameters [
+    {:default nil :description "File path" :enum_values nil :name "path" :param_type "string" :required true}
+    {:default 200 :description "Max lines" :enum_values nil :name "limit" :param_type "integer" :required false}
+  ]
+  :timeout_ms 5000
+}

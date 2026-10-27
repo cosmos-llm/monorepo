@@ -1,0 +1,39 @@
+[
+  {
+    "type": "message",
+    "id": 1,
+    "message": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "a"
+        }
+      ]
+    },
+    "in_context": false
+  },
+  {
+    "type": "tool_display",
+    "call_id": "c",
+    "display": {
+      "x": 1
+    }
+  },
+  {
+    "type": "compaction",
+    "replaces": {
+      "start": 1,
+      "end": 3
+    },
+    "summary": 4
+  },
+  {
+    "type": "truncated",
+    "after": 2
+  },
+  {
+    "type": "model_changed",
+    "model": "m"
+  }
+]

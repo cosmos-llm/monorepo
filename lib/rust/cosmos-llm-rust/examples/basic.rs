@@ -45,7 +45,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let resp = client.chat(req).await?;
     println!(
         "Chat response: {}",
-        resp.content().unwrap_or("(no content)")
+        resp.content().unwrap_or_else(|| "(no content)".to_owned())
     );
 
     if let Some(usage) = resp.usage {

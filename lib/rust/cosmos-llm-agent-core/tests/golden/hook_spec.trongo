@@ -1,0 +1,7 @@
+[
+  {:command "cargo fmt -- \$COSMOS_FILE_PATHS" :event "post_tool_use" :matcher "edit|multi_edit|write" :payload_format "json" :timeout_ms 10000}
+  {:command "scripts/guard.sh" :event "pre_tool_use" :matcher "bash" :payload_format "json" :timeout_ms 30000}
+  {:command "date" :event "user_prompt_submit" :payload_format "json" :timeout_ms 30000}
+  {:command "scripts/check-tests.sh" :event "stop" :payload_format "trongo" :timeout_ms 30000}
+  {:command "git status --short" :event "session_start" :payload_format "json" :timeout_ms 30000}
+]

@@ -1,0 +1,7 @@
+{
+  :content [
+    {:text "edited src/lib.rs (+2 -1)" :type "text"}
+  ]
+  :display {:added 2 :path "src/lib.rs" :removed 1}
+  :is_error false
+}

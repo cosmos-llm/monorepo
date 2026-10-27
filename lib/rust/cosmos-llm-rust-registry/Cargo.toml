@@ -1,0 +1,18 @@
+[package]
+name = "cosmos-llm-registry"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Link-time plugin registries with priority-based overrides, built on inventory"
+license = "MIT"
+repository = "https://github.com/durableprogramming/cosmos-llm-rust"
+documentation = "https://docs.rs/cosmos-llm-registry"
+readme = "README.md"
+keywords = ["llm", "plugin", "registry", "inventory"]
+categories = ["rust-patterns"]
+
+[dependencies]
+inventory = "0.3"
+thiserror = "2"
+
+[dev-dependencies]

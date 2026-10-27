@@ -1,0 +1,90 @@
+[
+  {
+    "type": "session_start",
+    "v": 1,
+    "id": "67e55044-10b1-426f-9247-bb680e5fe0c8",
+    "cwd": "/work/repo",
+    "model": "claude-sonnet-4",
+    "started_at": "2026-10-27T14:03:11Z",
+    "parent": {
+      "session": "11111111-2222-4333-8444-555555555555",
+      "at": 3
+    }
+  },
+  {
+    "type": "message",
+    "id": 1,
+    "message": {
+      "role": "user",
+      "content": [
+        {
+          "type": "text",
+          "text": "hello"
+        }
+      ]
+    }
+  },
+  {
+    "type": "message",
+    "id": 2,
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "hi there"
+        }
+      ]
+    },
+    "usage": {
+      "prompt_tokens": 10,
+      "completion_tokens": 3,
+      "total_tokens": 13,
+      "cache_read_tokens": 0,
+      "cache_write_tokens": 0,
+      "reasoning_tokens": 0,
+      "steps": 1
+    }
+  },
+  {
+    "type": "tool_outcome",
+    "call_id": "call_1",
+    "display": {
+      "exit_code": 0
+    }
+  },
+  {
+    "type": "compaction",
+    "replaces": {
+      "start": 1,
+      "end": 5
+    },
+    "summary": 6,
+    "except": [
+      3
+    ]
+  },
+  {
+    "type": "model_changed",
+    "model": "gpt-5"
+  },
+  {
+    "type": "truncated",
+    "after": 4
+  },
+  {
+    "type": "file_changes",
+    "turn": 1,
+    "files": [
+      {
+        "path": "src/lib.rs",
+        "before": "ab12",
+        "after": "cd34"
+      },
+      {
+        "path": "new.rs",
+        "after": "ef56"
+      }
+    ]
+  }
+]

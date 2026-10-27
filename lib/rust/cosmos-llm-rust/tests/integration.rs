@@ -296,6 +296,7 @@ fn openai_stream_body_accumulates_into_response() {
                 finish_reason: choice["finish_reason"].as_str().map(str::to_owned),
                 tool_calls: vec![],
                 usage: None,
+                ..Default::default()
             });
         }
 
@@ -368,7 +369,7 @@ async fn openrouter_sends_the_routing_block_on_the_wire() {
     let resp = client.completion(req).await.unwrap();
 
     mock.assert_async().await;
-    assert_eq!(resp.content(), Some("ok"));
+    assert_eq!(resp.content().as_deref(), Some("ok"));
 }
 
 #[tokio::test]

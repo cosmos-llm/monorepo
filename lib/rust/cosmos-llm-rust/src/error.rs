@@ -227,6 +227,13 @@ pub enum CosmosError {
         limit: Option<u32>,
     },
 
+    /// The caller cancelled the request through its
+    /// [`CancellationToken`](crate::CancellationToken).
+    ///
+    /// Not retryable: the caller asked for the work to stop.
+    #[error("request cancelled")]
+    Cancelled,
+
     /// An HTTP transport error with no provider attribution.
     ///
     /// Prefer [`CosmosError::Network`], which names the provider. This variant
@@ -290,6 +297,7 @@ impl CosmosError {
             | Self::Streaming { .. }
             | Self::ContentFiltered { .. }
             | Self::ContextLength { .. }
+            | Self::Cancelled
             | Self::Json(_) => false,
         }
     }
@@ -358,8 +366,21 @@ impl CosmosError {
             | Self::ContextLength { provider, .. } => provider,
 
             Self::UnsupportedProvider { name } => name,
-            Self::Http(_) | Self::Json(_) => SYSTEM,
+            Self::Http(_) | Self::Json(_) | Self::Cancelled => SYSTEM,
         }
+    }
+
+    /// Returns `true` if the request was cancelled by its token.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::CosmosError;
+    /// assert!(CosmosError::Cancelled.is_cancelled());
+    /// assert!(!CosmosError::Cancelled.is_retryable());
+    /// ```
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self, Self::Cancelled)
     }
 
     /// Builds a [`CosmosError::Configuration`] not tied to any provider.
@@ -491,6 +512,7 @@ mod tests {
                 provider: "openai".into(),
                 limit: Some(128_000),
             },
+            CosmosError::Cancelled,
         ] {
             assert!(!err.is_retryable(), "{err} should not be retryable");
         }

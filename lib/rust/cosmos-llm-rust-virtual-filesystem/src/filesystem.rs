@@ -198,6 +198,108 @@ impl Filesystem {
         child.find_file(&parts[1..].join("/"))
     }
 
+    /// Returns the directory at `path`, relative to this node.
+    ///
+    /// An empty path (or `"/"`) is this node itself.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_virtual_filesystem::Filesystem;
+    ///
+    /// let fs = Filesystem::build("/", |root| {
+    ///     root.directory("src", |_| {});
+    /// });
+    /// assert!(fs.find_dir("src").is_some());
+    /// assert!(fs.find_dir("nope").is_none());
+    /// assert!(fs.find_dir("").is_some());
+    /// ```
+    pub fn find_dir(&self, path: &str) -> Option<&Filesystem> {
+        let mut node = self;
+        for part in path.split('/').filter(|s| !s.is_empty()) {
+            node = node.children.iter().find(|c| c.name == part)?;
+        }
+        Some(node)
+    }
+
+    /// Creates or replaces the file at `path`, creating missing directories.
+    ///
+    /// The first mutating API on the tree. An existing file keeps its
+    /// attributes; only the content changes.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VfsError::InvalidPath`] if `path` has no file name, and
+    /// [`VfsError::InvalidName`] if a segment is not a valid name.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_virtual_filesystem::Filesystem;
+    ///
+    /// let mut fs = Filesystem::new("/");
+    /// fs.set_file("a/b.txt", "hi").unwrap();
+    /// assert_eq!(fs.find_file("a/b.txt").unwrap().content.as_deref(), Some("hi"));
+    /// fs.set_file("a/b.txt", "bye").unwrap();
+    /// assert_eq!(fs.find_file("a/b.txt").unwrap().content.as_deref(), Some("bye"));
+    /// ```
+    pub fn set_file(&mut self, path: &str, content: impl Into<String>) -> Result<(), VfsError> {
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let (name, dirs) = parts
+            .split_last()
+            .ok_or_else(|| VfsError::InvalidPath("path has no file name".into()))?;
+        let mut node = self;
+        for d in dirs {
+            let idx = match node.children.iter().position(|c| c.name == *d) {
+                Some(i) => i,
+                None => {
+                    node.children.push(Filesystem::new(*d));
+                    node.children.len() - 1
+                }
+            };
+            node = &mut node.children[idx];
+        }
+        let content = content.into();
+        if let Some(f) = node.files.iter_mut().find(|f| f.name == *name) {
+            f.content = Some(content);
+        } else {
+            node.files
+                .push(VirtualFile::new(*name, Some(content), HashMap::new())?);
+        }
+        Ok(())
+    }
+
+    /// Removes the file at `path`. Returns `true` if a file was removed.
+    ///
+    /// Emptied directories are kept.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_virtual_filesystem::Filesystem;
+    ///
+    /// let mut fs = Filesystem::new("/");
+    /// fs.set_file("a.txt", "x").unwrap();
+    /// assert!(fs.remove_file("a.txt"));
+    /// assert!(!fs.remove_file("a.txt"));
+    /// ```
+    pub fn remove_file(&mut self, path: &str) -> bool {
+        let parts: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        let Some((name, dirs)) = parts.split_last() else {
+            return false;
+        };
+        let mut node = self;
+        for d in dirs {
+            match node.children.iter_mut().find(|c| c.name == *d) {
+                Some(c) => node = c,
+                None => return false,
+            }
+        }
+        let before = node.files.len();
+        node.files.retain(|f| f.name != *name);
+        node.files.len() != before
+    }
+
     /// Returns all files in this subtree, each paired with its full path.
     ///
     /// # Examples

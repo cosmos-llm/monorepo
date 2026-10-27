@@ -49,6 +49,15 @@
 //! [`Client::stream_to_completion`] does this for you while still handing each
 //! chunk to a callback for live output.
 //!
+//! ## Typed messages
+//!
+//! A [`Message`] holds [`ContentBlock`]s: text, images, thinking, tool calls and
+//! tool results. [`Message::user`] and friends build the text-only case,
+//! [`Message::text`] reads it back. See [`Reasoning`] for extended thinking,
+//! [`apply_default_cache_breakpoints`] for prompt caching,
+//! [`CompletionRequest::with_cancel`] for cancellation, [`ModelInfo`] for model
+//! limits, and [`tokens`] for estimating a request's size.
+//!
 //! ## Environment variables
 //!
 //! | Variable | Provider |
@@ -106,20 +115,35 @@
 //!
 //! See the [`opencode`] module for details.
 
+pub mod cache;
 pub mod client;
 pub mod config;
+pub mod content;
 pub mod error;
+pub mod model;
 pub mod opencode;
 pub mod providers;
+pub mod reasoning;
 pub mod routing;
 pub mod sse;
+pub mod tokens;
+#[cfg(feature = "trongo")]
+pub mod trongo;
 pub mod types;
 
+pub use cache::apply_default_cache_breakpoints;
 pub use client::Client;
 pub use config::Config;
+pub use content::{CacheHint, ContentBlock, ImageSource, Role};
 pub use error::{CosmosError, SYSTEM};
+pub use model::{ModelInfo, Pricing};
 pub use providers::{resolve_with_base_url, CompletionStream};
+pub use reasoning::{Reasoning, ReasoningEffort, ThinkingDelta};
 pub use routing::{DataCollection, MaxPrice, OpenRouterRouting, ProviderSort, SortPartition};
+pub use tokens::{estimate_tokens, CharsEstimator, TokenEstimator};
+pub use tokio_util::sync::CancellationToken;
+#[cfg(feature = "trongo")]
+pub use trongo::{from_trongo, to_trongo};
 pub use types::{
     Choice, CompletionRequest, CompletionResponse, Message, RouteInfo, StreamAccumulator,
     StreamChunk, ToolCall, ToolCallDelta, Usage,

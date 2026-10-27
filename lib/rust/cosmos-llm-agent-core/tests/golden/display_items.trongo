@@ -1,0 +1,25 @@
+[
+  {
+    :id 1
+    :in_context false
+    :message {
+      :content [
+        {:text "a" :type "text"}
+      ]
+      :role "user"
+    }
+    :type "message"
+  }
+  {
+    :call_id "c"
+    :display {:x 1}
+    :type "tool_display"
+  }
+  {
+    :replaces {:end 3 :start 1}
+    :summary 4
+    :type "compaction"
+  }
+  {:after 2 :type "truncated"}
+  {:model "m" :type "model_changed"}
+]

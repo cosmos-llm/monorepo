@@ -1,0 +1,23 @@
+{
+  :cache "ephemeral"
+  :content [
+    {:signature "sig-abc" :text "The user wants the file." :type "thinking"}
+    {:data "ZW5jcnlwdGVk" :type "redacted_thinking"}
+    {:text "Let me read it." :type "text"}
+    {
+      :source {:data "AQID" :media_type "image/png" :type "base64"}
+      :type "image"
+    }
+    {
+      :source {:type "url" :url "https://example.com/a.png"}
+      :type "image"
+    }
+    {
+      :id "toolu_1"
+      :input {:path "src/lib.rs"}
+      :name "read"
+      :type "tool_use"
+    }
+  ]
+  :role "assistant"
+}

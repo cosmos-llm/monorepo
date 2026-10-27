@@ -2,6 +2,11 @@ use retry_policy::RetryPolicy;
 
 use crate::config::Config;
 use crate::error::CosmosError;
+use std::future::Future;
+
+use tokio_util::sync::CancellationToken;
+
+use crate::model::ModelInfo;
 use crate::providers::{resolve, resolve_with_base_url, CompletionStream, Provider};
 use crate::types::{CompletionRequest, CompletionResponse, Message, StreamAccumulator};
 
@@ -36,6 +41,8 @@ pub struct Client {
     /// Off unless a caller opts in with [`Client::with_retry`]. See that method
     /// for why the default is off.
     retry: Option<RetryPolicy>,
+    /// Caller-supplied model descriptions, which win over every other source.
+    overrides: Vec<ModelInfo>,
 }
 
 impl Client {
@@ -70,6 +77,7 @@ impl Client {
             provider,
             default_model: model,
             retry: None,
+            overrides: Vec::new(),
         })
     }
 
@@ -98,6 +106,7 @@ impl Client {
             provider,
             default_model: None,
             retry: None,
+            overrides: Vec::new(),
         })
     }
 
@@ -127,6 +136,7 @@ impl Client {
             provider,
             default_model: None,
             retry: None,
+            overrides: Vec::new(),
         }
     }
 
@@ -172,6 +182,7 @@ impl Client {
             provider,
             default_model: None,
             retry: None,
+            overrides: Vec::new(),
         })
     }
 
@@ -188,6 +199,19 @@ impl Client {
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.default_model = Some(model.into());
         self
+    }
+
+    /// Returns the canonical name of the provider this client talks to.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use cosmos_llm::Client;
+    /// let client = Client::new("anthropic", "sk-test").unwrap();
+    /// assert_eq!(client.provider_name(), "anthropic");
+    /// ```
+    pub fn provider_name(&self) -> &str {
+        self.provider.name()
     }
 
     /// Retries failed requests according to `policy` (builder pattern).
@@ -362,12 +386,10 @@ impl Client {
         let req = CompletionRequest::new(model, vec![Message::user(prompt)]);
         let resp = self.completion(req).await?;
 
-        resp.content()
-            .map(str::to_owned)
-            .ok_or_else(|| CosmosError::InvalidResponse {
-                provider: self.provider.name().to_owned(),
-                message: "provider returned no content".to_owned(),
-            })
+        resp.content().ok_or_else(|| CosmosError::InvalidResponse {
+            provider: self.provider.name().to_owned(),
+            message: "provider returned no content".to_owned(),
+        })
     }
 
     /// Sends a full [`CompletionRequest`] and returns the provider response.
@@ -390,7 +412,7 @@ impl Client {
     /// let req = CompletionRequest::new("gpt-4o", vec![Message::user("Hi")])
     ///     .with_temperature(0.5);
     /// let resp = client.completion(req).await.unwrap();
-    /// println!("{}", resp.content().unwrap_or(""));
+    /// println!("{}", resp.text());
     /// # })
     /// ```
     pub async fn completion(
@@ -398,19 +420,33 @@ impl Client {
         mut req: CompletionRequest,
     ) -> Result<CompletionResponse, CosmosError> {
         self.fill_default_model(&mut req)?;
+        self.check_reasoning(&req)?;
 
-        let Some(policy) = self.retry.as_ref() else {
-            return self.provider.completion(&req).await;
+        let token = req.cancel.clone();
+        let attempts = async {
+            let Some(policy) = self.retry.as_ref() else {
+                return self.provider.completion(&req).await;
+            };
+
+            // The attempt history is discarded here because `completion` returns
+            // `CosmosError`, not a retry error. Callers who need the history should
+            // drive `RetryPolicy` themselves; folding a second error type into this
+            // signature would be a breaking change for every existing caller.
+            policy
+                .run(|| async {
+                    // Belt and braces: the race below drops this future when the
+                    // token fires, but a cancel must never start another attempt.
+                    if token.as_ref().is_some_and(CancellationToken::is_cancelled) {
+                        return Err(CosmosError::Cancelled);
+                    }
+                    self.provider.completion(&req).await
+                })
+                .await
+                .map_err(retry_policy::RetryError::into_last_error)
         };
-
-        // The attempt history is discarded here because `completion` returns
-        // `CosmosError`, not a retry error. Callers who need the history should
-        // drive `RetryPolicy` themselves; folding a second error type into this
-        // signature would be a breaking change for every existing caller.
-        policy
-            .run(|| self.provider.completion(&req))
-            .await
-            .map_err(retry_policy::RetryError::into_last_error)
+        // Racing the whole retry loop, not each attempt, is what cancels a
+        // backoff sleep: dropping the loop drops the sleep with it.
+        race_cancel(token.as_ref(), attempts).await
     }
 
     /// Sends a chat conversation and returns the provider response.
@@ -472,7 +508,31 @@ impl Client {
         mut req: CompletionRequest,
     ) -> Result<CompletionStream, CosmosError> {
         self.fill_default_model(&mut req)?;
-        self.provider.stream_completion(&req).await
+        self.check_reasoning(&req)?;
+
+        let Some(token) = req.cancel.clone() else {
+            return self.provider.stream_completion(&req).await;
+        };
+
+        let mut inner = race_cancel(Some(&token), self.provider.stream_completion(&req)).await?;
+        // Yield `Cancelled` once when the token fires, then end. Dropping the
+        // inner stream closes the connection.
+        Ok(Box::pin(async_stream::stream! {
+            use futures_util::StreamExt;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        yield Err(CosmosError::Cancelled);
+                        return;
+                    }
+                    item = inner.next() => match item {
+                        Some(item) => yield item,
+                        None => return,
+                    },
+                }
+            }
+        }))
     }
 
     /// Sends a plain text prompt and returns a stream of chunks.
@@ -519,6 +579,21 @@ impl Client {
     ///
     /// Returns [`CosmosError::Configuration`] when the request has no model and
     /// the client has no default to supply.
+    /// Fails locally when reasoning is requested of a model known not to
+    /// support it. Unknown models pass: the provider is the authority there.
+    fn check_reasoning(&self, req: &CompletionRequest) -> Result<(), CosmosError> {
+        if !req.reasoning.is_some_and(|r| r.is_on()) {
+            return Ok(());
+        }
+        match self.known_model_info(&req.model) {
+            Some(info) if !info.supports_reasoning => Err(CosmosError::Configuration {
+                provider: self.provider.name().to_owned(),
+                message: format!("model {} does not support reasoning", req.model),
+            }),
+            _ => Ok(()),
+        }
+    }
+
     fn fill_default_model(&self, req: &mut CompletionRequest) -> Result<(), CosmosError> {
         if req.model.is_empty() {
             req.model = self
@@ -605,6 +680,128 @@ impl Client {
     /// ```
     pub async fn models(&self) -> Result<Vec<String>, CosmosError> {
         self.provider.models().await
+    }
+
+    /// Registers a model description that wins over the provider's listing and
+    /// the built-in table (builder pattern).
+    ///
+    /// For local and proxied models the table cannot know. Registering the
+    /// same `id` twice keeps the later one.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::{Client, ModelInfo};
+    ///
+    /// let client = Client::new("openai", "not-checked-locally")
+    ///     .unwrap()
+    ///     .with_model_info(ModelInfo::new("openai", "my-local-model").with_context_window(32_768));
+    /// let info = client.known_model_info("my-local-model").unwrap();
+    /// assert_eq!(info.context_window, Some(32_768));
+    /// ```
+    pub fn with_model_info(mut self, info: ModelInfo) -> Self {
+        self.overrides.retain(|o| o.id != info.id);
+        self.overrides.push(info);
+        self
+    }
+
+    /// Looks a model up without the network: an override, else the built-in
+    /// table. `None` for a model neither knows.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::Client;
+    ///
+    /// let client = Client::new("anthropic", "sk-ant-test").unwrap();
+    /// let info = client.known_model_info("claude-3-5-sonnet-20241022").unwrap();
+    /// assert!(info.supports_tools);
+    /// ```
+    pub fn known_model_info(&self, id: &str) -> Option<ModelInfo> {
+        self.overrides
+            .iter()
+            .find(|o| o.id == id)
+            .cloned()
+            .or_else(|| ModelInfo::builtin(id))
+    }
+
+    /// Describes one model: limits, capabilities, prices.
+    ///
+    /// Sources, in order: a [`Client::with_model_info`] override; the
+    /// provider's listing (OpenRouter's carries windows and prices; Anthropic's
+    /// and OpenAI's carry ids only), with gaps filled from the built-in table;
+    /// the table alone. A model none of them know comes back with `None`
+    /// limits and every capability `false`, not as an error, so local models
+    /// work; check `context_window` before trusting it.
+    ///
+    /// # Errors
+    ///
+    /// A provider error, only when the model is also absent from the table.
+    pub async fn model_info(&self, id: &str) -> Result<ModelInfo, CosmosError> {
+        if let Some(info) = self.overrides.iter().find(|o| o.id == id) {
+            return Ok(info.clone());
+        }
+
+        let builtin = ModelInfo::builtin(id);
+        if let Some(info) = builtin
+            .as_ref()
+            .filter(|_| !self.provider.lists_model_details())
+        {
+            return Ok(info.clone());
+        }
+        match self.provider.models_info().await {
+            Ok(listed) => {
+                if let Some(mut info) = listed.into_iter().find(|m| m.id == id) {
+                    if let Some(table) = &builtin {
+                        info.fill_from(table);
+                    }
+                    return Ok(info);
+                }
+            }
+            Err(e) if builtin.is_none() => return Err(e),
+            Err(_) => {}
+        }
+        Ok(builtin.unwrap_or_else(|| ModelInfo::new(self.provider.name(), id)))
+    }
+
+    /// Describes every model the provider lists.
+    ///
+    /// Each entry is completed from the built-in table, and overrides replace
+    /// (or add to) the result. See [`Client::model_info`].
+    ///
+    /// # Errors
+    ///
+    /// Returns any provider error on failure.
+    pub async fn models_info(&self) -> Result<Vec<ModelInfo>, CosmosError> {
+        let mut listed = self.provider.models_info().await?;
+        for info in &mut listed {
+            if let Some(table) = ModelInfo::builtin(&info.id) {
+                info.fill_from(&table);
+            }
+        }
+        for over in &self.overrides {
+            match listed.iter_mut().find(|m| m.id == over.id) {
+                Some(slot) => *slot = over.clone(),
+                None => listed.push(over.clone()),
+            }
+        }
+        Ok(listed)
+    }
+}
+
+/// Runs `work` unless `token` fires first, in which case `work` is dropped
+/// and the call fails with [`CosmosError::Cancelled`].
+async fn race_cancel<T>(
+    token: Option<&CancellationToken>,
+    work: impl Future<Output = Result<T, CosmosError>>,
+) -> Result<T, CosmosError> {
+    let Some(token) = token else {
+        return work.await;
+    };
+    tokio::select! {
+        biased;
+        _ = token.cancelled() => Err(CosmosError::Cancelled),
+        result = work => result,
     }
 }
 

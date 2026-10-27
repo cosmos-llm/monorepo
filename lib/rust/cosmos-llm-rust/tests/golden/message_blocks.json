@@ -1,0 +1,12 @@
+{
+  "role": "assistant",
+  "content": [
+    {"type": "thinking", "text": "The user wants the file.", "signature": "sig-abc"},
+    {"type": "redacted_thinking", "data": "ZW5jcnlwdGVk"},
+    {"type": "text", "text": "Let me read it."},
+    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AQID"}},
+    {"type": "image", "source": {"type": "url", "url": "https://example.com/a.png"}},
+    {"type": "tool_use", "id": "toolu_1", "name": "read", "input": {"path": "src/lib.rs"}}
+  ],
+  "cache": "ephemeral"
+}

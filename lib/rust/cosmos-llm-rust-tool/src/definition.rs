@@ -3,10 +3,14 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+#[cfg(feature = "async")]
+use crate::context::ToolContext;
 use crate::error::ToolError;
 use crate::executor::Executor;
+use crate::output_limit::OutputLimit;
 use crate::parameter::{ParameterDef, ParameterType};
 use crate::schemas;
+use crate::spec::{ToolHints, ToolSpec};
 
 /// A synchronous handler: takes a JSON object of params, returns a JSON value.
 pub type HandlerFn = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
@@ -19,6 +23,21 @@ pub type HandlerFn = Arc<dyn Fn(&Value) -> Result<Value, String> + Send + Sync>;
 pub type AsyncHandlerFn = Arc<
     dyn Fn(Value) -> futures_util::future::BoxFuture<'static, Result<Value, String>> + Send + Sync,
 >;
+
+/// An asynchronous handler that also receives a [`ToolContext`]: the call id,
+/// a cancellation token, and a progress sink.
+#[cfg(feature = "async")]
+pub type ContextHandlerFn = Arc<
+    dyn Fn(Value, ToolContext) -> futures_util::future::BoxFuture<'static, Result<Value, String>>
+        + Send
+        + Sync,
+>;
+
+/// Derives per-call [`ToolHints`] (usually the paths) from a call's arguments.
+pub type HintsFn = Arc<dyn Fn(&Value) -> ToolHints + Send + Sync>;
+
+/// Derives a preview of what a call will do, for the approval prompt.
+pub type PreviewFn = Arc<dyn Fn(&Value) -> Option<Value> + Send + Sync>;
 
 /// A tool's execution body.
 ///
@@ -35,6 +54,9 @@ pub enum Handler {
     /// A handler that returns a future.
     #[cfg(feature = "async")]
     Async(AsyncHandlerFn),
+    /// A handler that returns a future and receives a [`ToolContext`].
+    #[cfg(feature = "async")]
+    Context(ContextHandlerFn),
 }
 
 impl std::fmt::Debug for Handler {
@@ -43,6 +65,8 @@ impl std::fmt::Debug for Handler {
             Self::Sync(_) => f.write_str("Sync(<handler>)"),
             #[cfg(feature = "async")]
             Self::Async(_) => f.write_str("Async(<handler>)"),
+            #[cfg(feature = "async")]
+            Self::Context(_) => f.write_str("Context(<handler>)"),
         }
     }
 }
@@ -63,7 +87,7 @@ impl Handler {
         match self {
             Self::Sync(_) => false,
             #[cfg(feature = "async")]
-            Self::Async(_) => true,
+            Self::Async(_) | Self::Context(_) => true,
         }
     }
 }
@@ -100,6 +124,15 @@ pub struct ToolDefinition {
     ///
     /// `None` means unbounded. Set it with [`ToolDefinition::timeout`].
     pub timeout: Option<Duration>,
+    /// Per-tool cap on what its result adds to the model's context.
+    ///
+    /// `None` means the caller's default applies. Set it with
+    /// [`ToolDefinition::output_limit`].
+    pub output_limit: Option<OutputLimit>,
+    /// Static policy hints, before any per-call [`ToolDefinition::hints`].
+    pub base_hints: ToolHints,
+    pub(crate) hints_fn: Option<HintsFn>,
+    pub(crate) preview_fn: Option<PreviewFn>,
     pub(crate) handler: Option<Handler>,
 }
 
@@ -110,6 +143,8 @@ impl std::fmt::Debug for ToolDefinition {
             .field("description", &self.description)
             .field("parameters", &self.parameters)
             .field("timeout", &self.timeout)
+            .field("output_limit", &self.output_limit)
+            .field("base_hints", &self.base_hints)
             .field("handler", &self.handler)
             .finish()
     }
@@ -132,8 +167,126 @@ impl ToolDefinition {
             description: String::new(),
             parameters: Vec::new(),
             timeout: None,
+            output_limit: None,
+            base_hints: ToolHints::default(),
+            hints_fn: None,
+            preview_fn: None,
             handler: None,
         }
+    }
+
+    /// Builds a definition from its data half; attach a handler afterwards.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::{ToolDefinition, ToolSpec};
+    /// use serde_json::json;
+    ///
+    /// let t = ToolDefinition::from_spec(ToolSpec::new("t")).handler(|_| Ok(json!(1)));
+    /// assert_eq!(t.spec().name, "t");
+    /// ```
+    pub fn from_spec(spec: ToolSpec) -> Self {
+        Self {
+            timeout: spec.timeout(),
+            name: spec.name,
+            description: spec.description,
+            parameters: spec.parameters,
+            output_limit: spec.output_limit,
+            base_hints: spec.hints,
+            hints_fn: None,
+            preview_fn: None,
+            handler: None,
+        }
+    }
+
+    /// Returns the data half: everything except the handler and closures.
+    ///
+    /// Providers, policies and session logs only ever need this.
+    pub fn spec(&self) -> ToolSpec {
+        let mut spec = ToolSpec::new(self.name.clone());
+        spec.description = self.description.clone();
+        spec.parameters = self.parameters.clone();
+        spec.hints = self.base_hints.clone();
+        spec.timeout_ms = self
+            .timeout
+            .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+        spec.output_limit = self.output_limit;
+        spec
+    }
+
+    /// Marks the tool as read-only (read, glob, grep, list).
+    #[must_use]
+    pub fn read_only(mut self, yes: bool) -> Self {
+        self.base_hints.read_only = yes;
+        self
+    }
+
+    /// Marks the tool as destructive (write, edit, shell).
+    #[must_use]
+    pub fn destructive(mut self, yes: bool) -> Self {
+        self.base_hints.destructive = yes;
+        self
+    }
+
+    /// Derives per-call hints (usually the touched paths) from the arguments.
+    ///
+    /// The flags set with [`read_only`](Self::read_only) and
+    /// [`destructive`](Self::destructive) still apply; the closure may add to
+    /// them.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::{ToolDefinition, ToolHints};
+    /// use serde_json::json;
+    ///
+    /// let t = ToolDefinition::new("write")
+    ///     .destructive(true)
+    ///     .hints(|input| ToolHints::new().paths(input["path"].as_str()));
+    /// let h = t.call_hints(&json!({"path": "a.txt"}));
+    /// assert!(h.destructive);
+    /// assert_eq!(h.paths[0].to_str(), Some("a.txt"));
+    /// ```
+    #[must_use]
+    pub fn hints<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Value) -> ToolHints + Send + Sync + 'static,
+    {
+        self.hints_fn = Some(Arc::new(f));
+        self
+    }
+
+    /// Produces a preview of what a call will do before it runs.
+    ///
+    /// The approval prompt shows it in place of the raw arguments, so the user
+    /// approves the actual change (an edit's diff) rather than a JSON blob.
+    /// It must not have side effects.
+    #[must_use]
+    pub fn preview<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&Value) -> Option<Value> + Send + Sync + 'static,
+    {
+        self.preview_fn = Some(Arc::new(f));
+        self
+    }
+
+    /// Hints for one call: the static flags, plus whatever
+    /// [`hints`](Self::hints) derives from `input`.
+    pub fn call_hints(&self, input: &Value) -> ToolHints {
+        let mut hints = self.base_hints.clone();
+        if let Some(f) = &self.hints_fn {
+            let extra = f(input);
+            hints.read_only |= extra.read_only;
+            hints.destructive |= extra.destructive;
+            hints.paths.extend(extra.paths);
+        }
+        hints
+    }
+
+    /// The preview for one call, if the tool supplies one.
+    pub fn call_preview(&self, input: &Value) -> Option<Value> {
+        self.preview_fn.as_ref().and_then(|f| f(input))
     }
 
     /// Sets the description and returns `self`.
@@ -267,6 +420,42 @@ impl ToolDefinition {
         self
     }
 
+    /// Attaches an asynchronous handler that receives a [`ToolContext`].
+    ///
+    /// Use this for tools that run long or spawn processes: the context
+    /// carries the call's cancellation token and a sink for streaming output
+    /// to the UI. [`async_handler`](Self::async_handler) stays for tools that
+    /// need neither.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::ToolDefinition;
+    /// use serde_json::json;
+    ///
+    /// let tool = ToolDefinition::new("build").context_handler(|_params, ctx| {
+    ///     Box::pin(async move {
+    ///         ctx.progress.send("compiling...").await;
+    ///         Ok(json!("done"))
+    ///     })
+    /// });
+    /// assert!(tool.is_async());
+    /// ```
+    #[cfg(feature = "async")]
+    pub fn context_handler<F>(mut self, f: F) -> Self
+    where
+        F: Fn(
+                Value,
+                ToolContext,
+            ) -> futures_util::future::BoxFuture<'static, Result<Value, String>>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.handler = Some(Handler::Context(Arc::new(f)));
+        self
+    }
+
     /// Sets a wall-clock timeout for one execution and returns `self`.
     ///
     /// Enforced by [`Executor::execute_async`]. A tool that hangs must not hang
@@ -287,6 +476,26 @@ impl ToolDefinition {
     /// ```
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Overrides the default [`OutputLimit`] for this tool's results.
+    ///
+    /// A paginating `read` wants a higher cap; a shell tool wants
+    /// [`Truncate::HeadTail`](crate::output_limit::Truncate::HeadTail).
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use cosmos_llm_tool::output_limit::{OutputLimit, Truncate};
+    /// use cosmos_llm_tool::ToolDefinition;
+    ///
+    /// let t = ToolDefinition::new("bash")
+    ///     .output_limit(OutputLimit::new().strategy(Truncate::HeadTail { head_ratio: 0.3 }));
+    /// assert!(t.output_limit.is_some());
+    /// ```
+    pub fn output_limit(mut self, limit: OutputLimit) -> Self {
+        self.output_limit = Some(limit);
         self
     }
 

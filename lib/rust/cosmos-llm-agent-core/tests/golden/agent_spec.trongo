@@ -1,0 +1,22 @@
+[
+  {:description "General-purpose agent with all of your tools. Use it for multi-step research or changes whose details you do not need in your own context." :max_steps nil :mode nil :model nil :name "general" :prompt "You are a subagent working for another agent on a task it delegated. You see only the brief you were given. Work on it independently with your tools, then end with a final message that fully answers the brief: the other agent sees only that message, not your tool calls." :tools nil}
+  {
+    :description "Read-only codebase search. Use it to find where something is done or how a thing works; it cannot edit or run commands."
+    :max_steps nil
+    :mode "read_only"
+    :model nil
+    :name "explore"
+    :prompt "You are a read-only search subagent working for another agent. Find what the brief asks for by searching and reading files. You cannot change anything. End with a final message that answers the brief: name the files and lines that matter and quote only what is needed. The other agent sees only that message."
+    :tools ["read" "glob" "grep" "list"]
+  }
+  {
+    :description "Reviews rust changes"
+    :layer "user"
+    :max_steps 30
+    :mode "read_only"
+    :model "claude-haiku-5-5"
+    :name "review-rust"
+    :prompt "You review rust code."
+    :tools ["read" "glob" "grep"]
+  }
+]

@@ -47,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .with_max_tokens(256);
 
     let resp = client.chat(req).await?;
-    println!("{}", resp.content().unwrap_or(""));
+    println!("{}", resp.text());
 
     Ok(())
 }
@@ -117,6 +117,84 @@ See `examples/streaming.rs` for a runnable version:
 ```
 OPENAI_API_KEY=sk-... cargo run --example streaming
 ```
+
+## Messages and content blocks
+
+A `Message` is a `Role` plus a list of `ContentBlock`s. `Message::user("hi")`
+makes one text block; `msg.text()` joins the text back. Images, thinking, tool
+calls and tool results are other blocks, and a response keeps all of them in
+order, so `response.to_assistant_message()` replays a turn exactly as the model
+produced it.
+
+```rust
+use cosmos_llm::{ContentBlock, Message};
+
+let msg = Message::user_blocks(vec![
+    ContentBlock::text("What is in this screenshot?"),
+    ContentBlock::image_base64("image/png", std::fs::read("shot.png")?),
+]);
+```
+
+| Block | Anthropic | OpenAI | OpenRouter |
+|---|---|---|---|
+| `Text` | `text` | string / `text` part | same as OpenAI |
+| `Image` | `image` (base64 or url) | `image_url` part | same as OpenAI |
+| `Thinking` | `thinking` + `signature` (unsigned dropped) | dropped | `reasoning_details` |
+| `RedactedThinking` | `redacted_thinking` | dropped | `reasoning_details` |
+| `ToolUse` | `tool_use` | `tool_calls[]` | same as OpenAI |
+| `ToolResult` | `tool_result` in a user turn | `role: tool`, text only; images follow as a user message | same as OpenAI |
+
+## Reasoning
+
+```rust
+use cosmos_llm::{CompletionRequest, Message, Reasoning, ReasoningEffort};
+
+let req = CompletionRequest::new("claude-sonnet-4-6", vec![Message::user("Plan it")])
+    .with_reasoning(Reasoning::effort(ReasoningEffort::High));
+```
+
+On Anthropic this sets `thinking.budget_tokens` (minimal 1k, low 2k, medium
+8k, high 24k), raises `max_tokens` above it and drops `temperature`/`top_p`.
+Streamed reasoning arrives as `StreamChunk::thinking`; the accumulator turns it
+into signed `Thinking` blocks that are replayed with the tool results.
+`Usage::reasoning_tokens` is a subset of `completion_tokens`.
+
+## Prompt caching
+
+`apply_default_cache_breakpoints(&mut req)` marks the tool list, the system
+prompt and the two newest messages (Anthropic allows four). Call it each turn so
+the last two move forward. `Usage::cache_read_tokens` / `cache_write_tokens`
+report the result; `prompt_tokens` includes both. OpenAI caches prefixes by
+itself and never receives the markers.
+
+## Cancellation
+
+```rust
+use cosmos_llm::{CancellationToken, CompletionRequest, Message};
+
+let token = CancellationToken::new();
+let req = CompletionRequest::new("gpt-4o", vec![Message::user("hi")])
+    .with_cancel(token.clone());
+// Elsewhere: token.cancel();  the call returns CosmosError::Cancelled.
+```
+
+The token is honoured by `Client`, not by a bare `Provider`. A cancel drops the
+HTTP request, never starts another retry attempt, and ends a stream with one
+`Err(Cancelled)`.
+
+## Model metadata
+
+`client.model_info("claude-sonnet-4-6").await` returns a `ModelInfo`: context
+window, output cap, capability flags and prices. `Client::known_model_info` is
+the same lookup without the network. Register local or proxied models with
+`Client::with_model_info`. The built-in table (`models.trongo`) is a starting
+point and drifts; unknown models come back with `None` limits.
+
+## TrongoScript
+
+With the default `trongo` feature, `from_trongo` and `to_trongo` read and write
+the IR types (`Message`, `ModelInfo`, ...) as TrongoScript data. Golden files in
+both forms live in `tests/golden/`.
 
 ## Configuration
 

@@ -1,0 +1,34 @@
+{
+  :sections [
+    {
+      :content [
+        {:text "You are a coding agent." :type "text"}
+      ]
+      :kind "base"
+      :stability "static"
+    }
+    {
+      :content [
+        {:text "Prefer read before edit." :type "text"}
+      ]
+      :kind "tool_guidance"
+      :stability "static"
+    }
+    {
+      :cache {:type "ephemeral"}
+      :content [
+        {:text "Instructions from /repo/AGENTS.md:\n\nRun cargo test." :type "text"}
+      ]
+      :kind "instructions"
+      :source "/repo/AGENTS.md"
+      :stability "session"
+    }
+    {
+      :content [
+        {:text "<environment>\nWorking directory: /repo\n</environment>" :type "text"}
+      ]
+      :kind "environment"
+      :stability "session"
+    }
+  ]
+}

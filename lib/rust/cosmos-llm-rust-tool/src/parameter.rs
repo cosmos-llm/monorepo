@@ -61,7 +61,7 @@ impl ParameterType {
 }
 
 /// Definition of a single parameter for a tool.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ParameterDef {
     /// Parameter name.
     pub name: String,

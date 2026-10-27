@@ -36,8 +36,10 @@ use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::content::{ContentBlock, Role};
 use crate::error::CosmosError;
 use crate::providers::{CompletionStream, Provider};
+use crate::reasoning::ThinkingDelta;
 use crate::types::{
     Choice, CompletionRequest, CompletionResponse, Message, StreamChunk, ToolCall, ToolCallDelta,
     Usage,
@@ -369,6 +371,50 @@ impl MockProvider {
             "tool_calls",
             Some(usage),
         ))));
+        self
+    }
+
+    /// Appends a step returning `blocks` as the assistant's reply, in order.
+    ///
+    /// For turns the other builders cannot express, chiefly thinking before
+    /// text or before a tool call. A streamed reply replays the blocks as
+    /// thinking deltas, text fragments and tool-call fragments, in the same
+    /// order.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cosmos_llm::providers::mock::MockProvider;
+    /// use cosmos_llm::ContentBlock;
+    ///
+    /// let provider = MockProvider::new().respond_with_blocks(vec![
+    ///     ContentBlock::Thinking { text: "hmm".into(), signature: Some("sig".into()) },
+    ///     ContentBlock::text("done"),
+    /// ]);
+    /// assert_eq!(provider.remaining(), 1);
+    /// ```
+    pub fn respond_with_blocks(mut self, blocks: Vec<ContentBlock>) -> Self {
+        let message = Message::assistant_blocks(blocks);
+        let text = message.text();
+        let calls: Vec<ToolCall> = message.tool_calls().collect();
+        let reason = if calls.is_empty() {
+            "stop"
+        } else {
+            "tool_calls"
+        };
+        let usage = estimated_usage(&text);
+        self.steps.push(Step::Respond(Box::new(CompletionResponse {
+            id: Some("mock-response".to_owned()),
+            model: Some("mock-model".to_owned()),
+            choices: vec![Choice {
+                index: 0,
+                message,
+                finish_reason: Some(reason.to_owned()),
+                tool_calls: calls,
+            }],
+            usage: Some(usage),
+            route: None,
+        })));
         self
     }
 
@@ -722,7 +768,7 @@ fn response_of(
         model: Some("mock-model".to_owned()),
         choices: vec![Choice {
             index: 0,
-            message: Message::assistant(text),
+            message: Message::assistant_with_tools(text, tool_calls.clone()),
             finish_reason: Some(finish_reason.to_owned()),
             tool_calls,
         }],
@@ -755,14 +801,14 @@ fn canned_response(canned: &Canned, req: &CompletionRequest) -> CompletionRespon
             .messages
             .iter()
             .rev()
-            .find(|m| m.role == "user")
-            .map(|m| m.content.clone())
+            .find(|m| m.role == Role::User)
+            .map(|m| m.text())
             .unwrap_or_default(),
         Canned::Count => req.messages.len().to_string(),
         Canned::Fixed(s) => s.clone(),
     };
 
-    let prompt_tokens = req.messages.iter().map(|m| tokens_in(&m.content)).sum();
+    let prompt_tokens = req.messages.iter().map(|m| tokens_in(&m.text())).sum();
     let completion_tokens = tokens_in(&text);
 
     let mut resp = response_of(text, Vec::new(), "stop", None);
@@ -781,38 +827,77 @@ fn canned_response(canned: &Canned, req: &CompletionRequest) -> CompletionRespon
 /// chunks are not required to repeat.
 fn chunks_for(resp: &CompletionResponse, chunking: &Chunking) -> Vec<StreamChunk> {
     let mut out = Vec::new();
+    let mut next_tool = 0u32;
 
-    for fragment in chunking.split(resp.text()) {
-        out.push(StreamChunk::text(fragment));
-    }
-
-    for (index, call) in resp.tool_calls().iter().enumerate() {
-        let index = index as u32;
-        // The opening fragment carries id and name and no arguments, which is
-        // what both OpenAI and Anthropic send.
-        out.push(StreamChunk {
-            tool_calls: vec![ToolCallDelta {
-                index,
-                id: Some(call.id.clone()),
-                name: Some(call.name.clone()),
-                arguments: None,
-            }],
+    // Block by block, in order, so thinking, text and tool calls arrive
+    // interleaved the way a real stream delivers them.
+    for (position, block) in resp.to_assistant_message().content.iter().enumerate() {
+        let thinking = |delta| StreamChunk {
+            thinking: Some(delta),
             ..Default::default()
-        });
-
-        // Arguments are split by the same strategy as text, so
-        // `Chunking::PerCharacter` cuts the JSON between every character —
-        // the case that breaks a naive accumulator.
-        let args = call.input.to_string();
-        for fragment in chunking.split(&args) {
-            out.push(StreamChunk {
-                tool_calls: vec![ToolCallDelta {
+        };
+        let index = position as u32;
+        match block {
+            ContentBlock::Text { text } => {
+                for fragment in chunking.split(text) {
+                    out.push(StreamChunk::text(fragment));
+                }
+            }
+            ContentBlock::Thinking { text, signature } => {
+                // An opening delta, even when empty, fixes the block's place.
+                out.push(thinking(ThinkingDelta::Text {
                     index,
-                    arguments: Some(fragment),
+                    text: String::new(),
+                }));
+                for fragment in chunking.split(text) {
+                    out.push(thinking(ThinkingDelta::Text {
+                        index,
+                        text: fragment,
+                    }));
+                }
+                if let Some(signature) = signature {
+                    out.push(thinking(ThinkingDelta::Signature {
+                        index,
+                        signature: signature.clone(),
+                    }));
+                }
+            }
+            ContentBlock::RedactedThinking { data } => {
+                out.push(thinking(ThinkingDelta::Redacted {
+                    index,
+                    data: data.clone(),
+                }));
+            }
+            ContentBlock::ToolUse { id, name, input } => {
+                let index = next_tool;
+                next_tool += 1;
+                // The opening fragment carries id and name and no arguments,
+                // which is what both OpenAI and Anthropic send.
+                out.push(StreamChunk {
+                    tool_calls: vec![ToolCallDelta {
+                        index,
+                        id: Some(id.clone()),
+                        name: Some(name.clone()),
+                        arguments: None,
+                    }],
                     ..Default::default()
-                }],
-                ..Default::default()
-            });
+                });
+
+                // Arguments are split by the same strategy as text, so
+                // `Chunking::PerCharacter` cuts the JSON between every
+                // character — the case that breaks a naive accumulator.
+                for fragment in chunking.split(&input.to_string()) {
+                    out.push(StreamChunk {
+                        tool_calls: vec![ToolCallDelta {
+                            index,
+                            arguments: Some(fragment),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    });
+                }
+            }
+            _ => {}
         }
     }
 
@@ -977,7 +1062,7 @@ mod tests {
         assert_eq!(seen[0].temperature, Some(0.25));
         assert_eq!(seen[0].max_tokens, Some(64));
         assert!(seen[0].tools.is_some());
-        assert_eq!(provider.last_request().unwrap().messages[0].content, "hi");
+        assert_eq!(provider.last_request().unwrap().messages[0].text(), "hi");
     }
 
     #[tokio::test]

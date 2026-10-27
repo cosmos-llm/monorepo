@@ -1,0 +1,39 @@
+[
+  {
+    "name": "general",
+    "description": "General-purpose agent with all of your tools. Use it for multi-step research or changes whose details you do not need in your own context.",
+    "tools": null,
+    "model": null,
+    "max_steps": null,
+    "prompt": "You are a subagent working for another agent on a task it delegated. You see only the brief you were given. Work on it independently with your tools, then end with a final message that fully answers the brief: the other agent sees only that message, not your tool calls.",
+    "mode": null
+  },
+  {
+    "name": "explore",
+    "description": "Read-only codebase search. Use it to find where something is done or how a thing works; it cannot edit or run commands.",
+    "tools": [
+      "read",
+      "glob",
+      "grep",
+      "list"
+    ],
+    "model": null,
+    "max_steps": null,
+    "prompt": "You are a read-only search subagent working for another agent. Find what the brief asks for by searching and reading files. You cannot change anything. End with a final message that answers the brief: name the files and lines that matter and quote only what is needed. The other agent sees only that message.",
+    "mode": "read_only"
+  },
+  {
+    "name": "review-rust",
+    "description": "Reviews rust changes",
+    "tools": [
+      "read",
+      "glob",
+      "grep"
+    ],
+    "model": "claude-haiku-5-5",
+    "max_steps": 30,
+    "prompt": "You review rust code.",
+    "mode": "read_only",
+    "layer": "user"
+  }
+]

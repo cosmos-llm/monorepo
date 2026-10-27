@@ -1,0 +1,14 @@
+[
+  {
+    :allow [
+      {:command "cargo test*" :tool "bash"}
+      {:path "docs/**" :tool "edit"}
+    ]
+    :deny [
+      {:command "git push*" :tool "bash"}
+    ]
+    :edit_tools ["write" "edit" "multi_edit"]
+    :mode "read_only"
+    :shell_tools ["bash" "shell"]
+  }
+]

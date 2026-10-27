@@ -1,0 +1,30 @@
+[
+  {
+    "mode": "read_only",
+    "allow": [
+      {
+        "tool": "bash",
+        "command": "cargo test*"
+      },
+      {
+        "tool": "edit",
+        "path": "docs/**"
+      }
+    ],
+    "deny": [
+      {
+        "tool": "bash",
+        "command": "git push*"
+      }
+    ],
+    "shell_tools": [
+      "bash",
+      "shell"
+    ],
+    "edit_tools": [
+      "write",
+      "edit",
+      "multi_edit"
+    ]
+  }
+]

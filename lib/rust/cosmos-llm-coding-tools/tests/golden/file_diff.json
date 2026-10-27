@@ -1,0 +1,15 @@
+{
+  "path": "src/lib.rs",
+  "kind": "modified",
+  "added": 2,
+  "removed": 1,
+  "hunks": [
+    {
+      "old_start": 3,
+      "old_lines": 4,
+      "new_start": 3,
+      "new_lines": 5,
+      "text": " fn a() {\n-    old();\n+    new();\n+    more(\"quoted\\path\");\n }\n"
+    }
+  ]
+}

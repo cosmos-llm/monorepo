@@ -1,0 +1,11 @@
+{
+  :call_id "call_1"
+  :hints {
+    :destructive true
+    :paths ["src/lib.rs"]
+    :read_only false
+  }
+  :input {:file_path "src/lib.rs"}
+  :preview {:diff "-old\n+new\n"}
+  :tool "edit"
+}

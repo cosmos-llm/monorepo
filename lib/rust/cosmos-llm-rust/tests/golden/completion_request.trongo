@@ -1,0 +1,27 @@
+{
+  :cache_tools "ephemeral"
+  :max_tokens 4096
+  :messages [
+    {
+      :cache "ephemeral_long"
+      :content [
+        {:text "Be brief." :type "text"}
+      ]
+      :role "system"
+    }
+    {
+      :content [
+        {:text "hi" :type "text"}
+      ]
+      :role "user"
+    }
+  ]
+  :model "claude-sonnet-4-6"
+  :reasoning {:tokens 2048 :type "budget"}
+  :tools [
+    {
+      :input_schema {:type "object"}
+      :name "read"
+    }
+  ]
+}

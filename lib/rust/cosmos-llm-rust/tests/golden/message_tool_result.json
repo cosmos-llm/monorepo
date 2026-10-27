@@ -1,0 +1,15 @@
+{
+  "role": "tool",
+  "content": [
+    {
+      "type": "tool_result",
+      "tool_use_id": "toolu_1",
+      "content": [
+        {"type": "text", "text": "fn main() {}"},
+        {"type": "image", "source": {"type": "url", "url": "https://example.com/shot.png"}}
+      ],
+      "is_error": true
+    }
+  ],
+  "name": "read"
+}

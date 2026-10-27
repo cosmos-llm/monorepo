@@ -1,0 +1,8 @@
+[
+  {
+    "reason": "threshold",
+    "used": 150000,
+    "window": 200000,
+    "target": 70000
+  }
+]
